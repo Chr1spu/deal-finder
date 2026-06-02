@@ -1,0 +1,26 @@
+{
+  "itemId": "v1|123456789012|0",
+  "title": "Nintendo Switch OLED Console - White",
+  "price": {
+    "value": "249.99",
+    "currency": "USD"
+  },
+  "image": {
+    "imageUrl": "https://i.ebayimg.com/images/g/main.jpg"
+  },
+  "additionalImages": [
+    {"imageUrl": "https://i.ebayimg.com/images/g/extra1.jpg"},
+    {"imageUrl": "https://i.ebayimg.com/images/g/extra2.jpg"}
+  ],
+  "itemLocation": {
+    "city": "Ithaca",
+    "stateOrProvince": "NY",
+    "country": "US"
+  },
+  "condition": "Used",
+  "categories": [
+    {"categoryId": "139971", "categoryName": "Video Game Consoles"}
+  ],
+  "itemCreationDate": "2026-08-01T14:32:00.000Z",
+  "itemWebUrl": "https://www.ebay.com/itm/123456789012"
+}

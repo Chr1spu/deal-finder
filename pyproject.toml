@@ -1,0 +1,46 @@
+[project]
+name = "deal-finder"
+version = "0.1.0"
+description = "Secondhand-marketplace deal finder that scans listings and scores them against a self-built history of comparable sold items."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.115,<0.116",
+    "uvicorn[standard]>=0.32,<0.33",
+    "sqlmodel>=0.0.22,<0.0.23",
+    "alembic>=1.14,<1.15",
+    "psycopg[binary]>=3.2,<3.3",
+    "redis>=5.2,<5.3",
+    "rq>=2.1,<2.2",
+    "httpx>=0.28,<0.29",
+    "pydantic-settings>=2.7,<2.8",
+    "python-dotenv>=1.0,<1.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3,<8.4",
+    "pytest-mock>=3.14,<3.15",
+    "respx>=0.22,<0.23",
+    "ruff>=0.8,<0.9",
+    "mypy>=1.13,<1.14",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+target-version = "py312"
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_ignores = true
+warn_redundant_casts = true
+disallow_untyped_defs = false
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
