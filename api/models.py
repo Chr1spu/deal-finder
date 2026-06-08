@@ -40,3 +40,19 @@ class Listing(SQLModel, table=True):
     last_seen_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (UniqueConstraint("source", "source_id", name="uq_listing_source_id"),)
+
+
+class SavedSearch(SQLModel, table=True):
+    """A keyword/location config that ingestion runs against.
+
+    No CRUD or auth yet (that's stage 5's "saved-search CRUD"). For now rows
+    come from a seed migration or get added by hand, per stage 1's scope of
+    "saved-search config, no UI yet."
+    """
+
+    id: int | None = Field(default=None, primary_key=True)
+
+    keyword: str
+    location: str | None = None
+
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

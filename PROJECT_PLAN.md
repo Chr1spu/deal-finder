@@ -51,40 +51,42 @@ Each stage assumes the ones before it are working end to end. Don't start a stag
 
 **1. Ingestion + data model**
 
-- Define `Listing` schema, set up Postgres + pgvector
-- eBay Browse API connector, normalize, store
-- Saved-search config (keyword + location), no UI yet
-- Start the disappearance-tracking job (needs time to accumulate data, so get it running as early as possible)
+- [x] Define `Listing` schema, set up Postgres + pgvector
+- [x] eBay Browse API connector, normalize, store
+- [x] Saved-search config (keyword + location), no UI yet
+- [x] Start the disappearance-tracking job (needs time to accumulate data, so get it running as early as possible)
+
+Code-complete, but not yet verified against real eBay data on an actual machine (this dev environment has no Docker or Python installed to run it against). Before calling stage 1 fully done: run `docker compose up`, `alembic upgrade head`, and `ingest_ebay.py` for real, and confirm `GET /listings` returns real rows.
 
 **2. Systems layer**
 
-- Redis job queue + scheduler
-- Rate limiting + backoff per source
-- Dedup logic (source ID + image hash)
+- [ ] Redis job queue + scheduler
+- [ ] Rate limiting + backoff per source
+- [ ] Dedup logic (source ID + image hash)
 
 **3. Feature pipeline**
 
-- CLIP embeddings pipeline on listing images, stored in pgvector
-- NLP extraction (brand/model/size/condition)
+- [ ] CLIP embeddings pipeline on listing images, stored in pgvector
+- [ ] NLP extraction (brand/model/size/condition)
 
 **4. Valuation engine**
 
-- k-NN comp retrieval against pgvector
-- Deal scoring logic + confidence weighting
+- [ ] k-NN comp retrieval against pgvector
+- [ ] Deal scoring logic + confidence weighting
 
 **5. Backend API**
 
-- FastAPI: auth, saved searches, deal feed endpoint
-- Alerting (Discord webhook to start; upgrade later if time allows)
+- [ ] FastAPI: auth, saved searches, deal feed endpoint
+- [ ] Alerting (Discord webhook to start; upgrade later if time allows)
 
 **6. Frontend**
 
-- React dashboard: deal feed, comp explanation view, watchlist, price chart
+- [ ] React dashboard: deal feed, comp explanation view, watchlist, price chart
 
 **7. Deploy + polish**
 
-- Docker Compose full stack, deploy api/worker + frontend
-- Write up README, polish devlog
+- [ ] Docker Compose full stack, deploy api/worker + frontend
+- [ ] Write up README, polish devlog
 
 ---
 
