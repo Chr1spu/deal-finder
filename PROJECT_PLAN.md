@@ -56,7 +56,7 @@ Each stage assumes the ones before it are working end to end. Don't start a stag
 - [x] Saved-search config (keyword + location), no UI yet
 - [x] Start the disappearance-tracking job (needs time to accumulate data, so get it running as early as possible)
 
-Code-complete, but not yet verified against real eBay data on an actual machine (this dev environment has no Docker or Python installed to run it against). Before calling stage 1 fully done: run `docker compose up`, `alembic upgrade head`, and `ingest_ebay.py` for real, and confirm `GET /listings` returns real rows.
+Verified for real on 2026-06-13: Docker Desktop and WSL2 installed, Postgres and Redis running healthy, both migrations applied, all 13 tests passing, and `GET /listings` / `GET /health` responding correctly against the real database. The one piece still unverified is a real eBay API call, since no developer credentials are configured yet. Register at developer.ebay.com, fill in `EBAY_CLIENT_ID` / `EBAY_CLIENT_SECRET` in `.env`, then run `python -m connectors.ingest_ebay` and confirm `GET /listings` returns real rows before calling stage 1 fully done.
 
 **2. Systems layer**
 

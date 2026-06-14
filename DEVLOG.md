@@ -1,5 +1,26 @@
 # Devlog
 
+## 2026-06-13 - Real verification: Docker, uv, migrations, tests, live API
+
+**Did:**
+- Installed WSL2, Docker Desktop, and `uv` on this machine (none were present before). WSL2 needed an elevated terminal and a restart, so this was a stop-and-resume across two turns.
+- Brought up Postgres (pgvector) and Redis for real via `docker compose up -d`, both report healthy.
+- Ran `uv sync`: installed Python 3.12.14 (uv manages its own Python installs) and all 42 dependencies, generating `uv.lock` for the first time.
+- Ran both Alembic migrations against the real database. Confirmed the `savedsearch` table has its seeded "nintendo switch" row.
+- Ran the full test suite for real for the first time: all 13 tests passed on the first try.
+- Fixed a Pydantic deprecation warning in `api/settings.py` (`class Config` to `model_config = SettingsConfigDict(...)`, the Pydantic v2-native way of doing the same thing).
+- Started the API with `uvicorn` and confirmed `GET /health` and `GET /listings` respond correctly against the real database (`/listings` correctly returns `[]`, since no eBay ingestion has run yet).
+
+**Decided:**
+- N/A, this session was verification, not new design decisions.
+
+**Broke / debugged:**
+- `wsl --install` silently failed with a confusing "not installed" message when run from this non-elevated shell instead of a clear permissions error. Root cause: WSL2 setup needs administrator rights, which this session's shell access doesn't have. Fixed by having the user run it themselves from an elevated PowerShell.
+
+**Next:**
+- Register an eBay Developer sandbox app, fill in `EBAY_CLIENT_ID` / `EBAY_CLIENT_SECRET` in `.env`, run `python -m connectors.ingest_ebay` for real, and confirm `GET /listings` returns live eBay data. That's the one remaining piece before stage 1 counts as fully done end to end.
+- Commit `uv.lock` now that it actually exists.
+
 ## 2026-06-08 - Closing out stage 1: saved-search config
 
 **Did:**
