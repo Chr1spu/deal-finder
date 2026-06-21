@@ -41,9 +41,10 @@ This is the heart of the project: scan listings across marketplaces, and for eac
 ### Practical notes
 
 - **eBay**: official Browse API for active listings. Reliable, so start here.
-- **Depop**: no official public API; unofficial endpoints are commonly used for hobby projects. Treat as best-effort, expect breakage.
-- **Facebook Marketplace**: ToS prohibits scraping and it's login-walled with strong bot detection. Treat as local-only, personal-use, and don't deploy or demo this part publicly.
-- "Recently sold" data generally isn't handed to you, so plan to build it yourself via disappearance-tracking, since it needs time to accumulate.
+- **Depop**: no official public API; unofficial endpoints are commonly used for hobby projects. Treat as best-effort, expect breakage. Pull-based like eBay: a scheduled connector polls it and gets folded into disappearance-tracking.
+- **Facebook Marketplace**: ToS prohibits scraping and it's login-walled with strong bot detection, so there's no server-side connector for it at all. Push-based instead: a browser extension running in the user's own logged-in session captures one listing at a time on click and posts it to the API. See `docs/decisions/0001-multi-source-connector-strategy.md`. No automated disappearance-tracking is possible for Facebook listings, only manual re-capture.
+- **OfferUp**: not yet in scope. Deferred until it's actually prioritized; will get the same pull-vs-push evaluation Depop and Facebook Marketplace just got.
+- "Recently sold" data generally isn't handed to you, so plan to build it yourself via disappearance-tracking, since it needs time to accumulate. Applies to pull-based sources (eBay, Depop); push-based sources like Facebook rely on manual re-capture instead.
 
 ### Roadmap (build order)
 
@@ -56,7 +57,9 @@ Each stage assumes the ones before it are working end to end. Don't start a stag
 - [x] Saved-search config (keyword + location), no UI yet
 - [x] Start the disappearance-tracking job (needs time to accumulate data, so get it running as early as possible)
 
-Verified for real on 2026-06-13: Docker Desktop and WSL2 installed, Postgres and Redis running healthy, both migrations applied, all 13 tests passing, and `GET /listings` / `GET /health` responding correctly against the real database. The one piece still unverified is a real eBay API call, since no developer credentials are configured yet. Register at developer.ebay.com, fill in `EBAY_CLIENT_ID` / `EBAY_CLIENT_SECRET` in `.env`, then run `python -m connectors.ingest_ebay` and confirm `GET /listings` returns real rows before calling stage 1 fully done.
+Verified for real on 2026-06-13: Docker Desktop and WSL2 installed, Postgres and Redis running healthy, both migrations applied, all 13 tests passing, and `GET /listings` / `GET /health` responding correctly against the real database.
+
+Verified for real on 2026-06-21: real eBay sandbox credentials configured, `python -m connectors.ingest_ebay` run against the live sandbox API, and `GET /listings` returned the real result. Stage 1 is fully done end to end, not just code-complete. Next up is stage 2 (systems layer).
 
 **2. Systems layer**
 
@@ -126,12 +129,12 @@ Each flavor needs real domain modeling (compatibility rules, style taxonomies, s
 - `README.md`
 - `DEVLOG.md`
 - `docs/decisions/`: ADRs, one file per real architectural decision
-    - `0001-why-a-job-queue.md`
-    - `0002-why-pgvector-not-a-separate-vector-db.md`
+    - `0001-multi-source-connector-strategy.md`
 - `connectors/`: `ebay.py`, `depop.py`, `normalizer.py`
 - `systems/`: `queue.py`, `scheduler.py`, `ratelimit.py`
 - `ml/`: `embeddings.py`, `nlp_extract.py`, `valuation.py`
 - `api/`: `main.py`, `auth.py`, `routes/`
+- `extension/`: browser extension for push-based capture (Facebook Marketplace first)
 - `frontend/`: React app
 - `infra/`: `docker-compose.yml`
 - `tests/`

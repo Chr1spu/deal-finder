@@ -1,5 +1,42 @@
 # Devlog
 
+## 2026-06-21 - Stage 1 fully verified: real eBay sandbox data end to end
+
+**Did:**
+- Registered eBay sandbox credentials, filled `EBAY_CLIENT_ID` / `EBAY_CLIENT_SECRET` into `.env`.
+- Brought Postgres/Redis back up (`docker compose up -d`), confirmed both healthy and already at migration head (the named volume survived the container recreate).
+- Ran `python -m connectors.ingest_ebay` for real against eBay's sandbox API: upserted 1 listing (a Joy-Con set matching the seeded "nintendo switch" saved search).
+- Confirmed `GET /listings` returns that real row and `GET /health` returns ok.
+
+**Decided:**
+- N/A, this was verification, not new design.
+
+**Broke / debugged:**
+- Port 8000 was held by a stale `uvicorn` process left running from an earlier session, which made the first `/listings` check return a 500. Not a bug in this session's code, just an old server still holding the port. Killed it and started a clean one.
+
+**Next:**
+- Stage 1 is done. Stage 2 (Redis job queue + scheduler, rate limiting/backoff, dedup) is next per the build order, before Depop or the Facebook extension get built (see `docs/decisions/0001-multi-source-connector-strategy.md`).
+- Consider switching `.env`'s `EBAY_ENV` from `sandbox` to `production` once ready to pull real, non-test eBay data.
+
+## 2026-06-21 - Multi-source connector strategy: Depop and Facebook Marketplace
+
+**Did:**
+- Wrote `docs/decisions/0001-multi-source-connector-strategy.md`, the first real ADR, deciding how Depop and Facebook Marketplace actually get ingested given neither has an official API and Facebook's ToS additionally prohibits scraping.
+- Updated `PROJECT_PLAN.md` (practical notes, repo structure) and `CLAUDE.md` (constraints, repo structure) to match.
+- Added Session 5 / Step 22 to `LEARNING_LOG.md` explaining the decision in build-guide detail.
+
+**Decided:**
+- Depop stays pull-based like eBay: a scheduled connector, following the same client/normalizer/ingest pattern as `connectors/ebay.py`, hitting Depop's unofficial endpoints. Low-investment, expect breakage, same framing as before, now made concrete as "pull-based."
+- Facebook Marketplace goes push-based instead: a browser extension running in the user's own logged-in session captures one listing at a time on click and posts it to the API. No server-side Facebook connector, and no automated disappearance-tracking for Facebook-sourced listings, only manual re-capture. Full reasoning and alternatives considered are in the ADR.
+- OfferUp is deferred, not addressed this session.
+
+**Broke / debugged:**
+- N/A.
+
+**Next:**
+- Finish verifying stage 1 end to end (the live eBay API call is still the one open item).
+- Once stage 1 is verified and stage 2's systems layer (queue, scheduler, rate limiting, dedup, and generalizing `disappearance_check.py` to loop per source) is in place, implement `connectors/depop.py` first, since it reuses the eBay pattern almost directly, then the Facebook browser extension.
+
 ## 2026-06-13 - Real verification: Docker, uv, migrations, tests, live API
 
 **Did:**
