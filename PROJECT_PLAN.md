@@ -63,9 +63,11 @@ Verified for real on 2026-06-21: real eBay sandbox credentials configured, `pyth
 
 **2. Systems layer**
 
-- [ ] Redis job queue + scheduler
-- [ ] Rate limiting + backoff per source
-- [ ] Dedup logic (source ID + image hash)
+- [x] Redis job queue + scheduler
+- [x] Rate limiting + backoff per source
+- [x] Dedup logic (source ID + image hash)
+
+Verified for real on 2026-06-26: migration applied against the real Postgres, a real ingest run against the eBay sandbox (no images on that sandbox item, so nothing to hash there, but the real network+Pillow+imagehash path was confirmed separately against a live image URL), both jobs enqueued against the real Redis and processed by a real `rq worker`. Image-hash dedup is compute-and-store only so far; the cross-source matching logic is deferred until Depop exists, see `docs/decisions/0002-image-hash-dedup.md`. Stage 2 is done. Next is stage 3 (feature pipeline), though `connectors/depop.py` is now unblocked too, per `docs/decisions/0001-multi-source-connector-strategy.md`.
 
 **3. Feature pipeline**
 

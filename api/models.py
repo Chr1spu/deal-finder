@@ -13,8 +13,10 @@ class ListingStatus(str, Enum):
 class Listing(SQLModel, table=True):
     """A normalized listing from any marketplace source.
 
-    (source, source_id) is the dedup key. See PROJECT_PLAN.md stage 2 for
-    the fuller dedup story once image-hash matching lands.
+    (source, source_id) is the dedup key within one source. image_hash
+    (a perceptual hash of the primary photo) is computed on ingest but not
+    yet used for cross-source duplicate matching, see
+    docs/decisions/0002-image-hash-dedup.md.
     """
 
     id: int | None = Field(default=None, primary_key=True)
@@ -27,6 +29,7 @@ class Listing(SQLModel, table=True):
     currency: str = "USD"
 
     images: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    image_hash: str | None = Field(default=None, index=True)
     location: str | None = None
     condition: str | None = None
     category: str | None = None

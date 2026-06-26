@@ -42,7 +42,15 @@ def test_get_item_returns_none_when_listing_is_gone():
     assert result is None
 
 
-def test_search_items_without_credentials_raises_clear_error():
+def test_search_items_without_credentials_raises_clear_error(monkeypatch):
+    """client_id="" alone isn't enough to simulate "no credentials": it's
+    falsy, so EbayClient's `client_id or settings.ebay_client_id` fallback
+    would silently pick up real credentials from .env if any are configured
+    (as they are, since stage 1's sandbox verification). Blank out settings
+    itself so this test reflects "nothing configured anywhere," not just
+    "nothing passed to the constructor"."""
+    monkeypatch.setattr("connectors.ebay.settings.ebay_client_id", "")
+    monkeypatch.setattr("connectors.ebay.settings.ebay_client_secret", "")
     client = EbayClient(client_id="", client_secret="", env="sandbox")
 
     try:

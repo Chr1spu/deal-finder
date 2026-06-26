@@ -11,5 +11,8 @@ class Settings(BaseSettings):
     ebay_client_id: str = ""
     ebay_client_secret: str = ""
 
+    ingest_interval_seconds: int = 3600
+    disappearance_check_interval_seconds: int = 21600
+
 
 settings = Settings()

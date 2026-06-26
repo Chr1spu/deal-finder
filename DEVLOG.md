@@ -1,5 +1,27 @@
 # Devlog
 
+## 2026-06-26 - Stage 2: systems layer built and verified end to end
+
+**Did:**
+- Built `systems/ratelimit.py` (retry-with-backoff for 429/5xx/transport errors) and wrapped all three of `connectors/ebay.py`'s HTTP calls with it.
+- Built `systems/queue.py` (RQ queue bound to Redis, `enqueue_ingest_all`/`enqueue_disappearance_check`) and `systems/scheduler.py` (a sleep-loop that enqueues both on independent, configurable intervals).
+- Generalized `connectors/disappearance_check.py` from eBay-only to a `PULL_BASED_SOURCES` registry plus `check_all_sources()`, per the ADR from the last session.
+- Added the compute-only half of image-hash dedup: `image_hash` column + migration, `connectors/image_hash.py` (perceptual hash via `imagehash`/Pillow), wired into `ingest_ebay.py` so new (or previously unhashed) listings get their primary photo hashed. Wrote `docs/decisions/0002-image-hash-dedup.md` first, since it's a new dependency plus a schema change.
+- Added 26 new/updated tests (ratelimit, queue, scheduler, generalized disappearance-check, image hashing, ingest). Full suite: 30 passed.
+- Fixed a pre-existing broken test (`test_search_items_without_credentials_raises_clear_error`): it passed `client_id=""` expecting that to simulate "no credentials," but that's falsy, so `EbayClient`'s `or` fallback was silently picking up the real sandbox credentials `.env` has had since the last session. Not something this session's changes caused, just never caught since no one re-ran the full suite after those credentials were added.
+- Verified everything for real against the actual Docker Postgres/Redis: ran the migration, ran a real ingest (sandbox item has no images, so nothing to hash there, but confirmed the real network+Pillow+imagehash path against a live public image URL separately), enqueued both jobs against real Redis and ran an `rq worker` to process them.
+
+**Decided:**
+- Scheduler is a plain sleep-loop, not `rq-scheduler`, keeping the same "RQ not Celery" minimal-moving-parts reasoning.
+- Image-hash dedup is compute-and-store only this stage. The actual cross-source duplicate-matching logic is deferred until Depop exists and there's a real second source to design the matching rules against.
+- Perceptual hash (`imagehash.phash`) over an exact byte hash, since eBay/Depop each re-encode photos independently and an exact hash would basically never match cross-source.
+
+**Broke / debugged:**
+- Plain `rq worker` doesn't run at all on Windows: RQ's default `Worker` calls `os.fork()`, which doesn't exist on this platform. Its `SimpleWorker` (no fork) gets further but then fails enforcing job timeouts via `signal.SIGALRM`, also missing on Windows. Fixed with `systems/queue.py::WindowsWorker` (`SimpleWorker` + `TimerDeathPenalty`, which uses `threading.Timer` instead), confirmed working by actually running both queued jobs to completion. Expected to be a non-issue once this runs in a Linux container (stage 7).
+
+**Next:**
+- Stage 2 is done and verified. Stage 3 (feature pipeline: CLIP embeddings, NLP extraction) is next per the build order, once `connectors/depop.py` (which stage 2 was explicitly meant to unblock) is decided on, or straight into stage 3 if Depop stays deferred a while longer.
+
 ## 2026-06-21 - Stage 1 fully verified: real eBay sandbox data end to end
 
 **Did:**

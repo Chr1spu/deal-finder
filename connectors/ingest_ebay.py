@@ -5,20 +5,30 @@ gets wired into the Redis scheduler in stage 2.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from sqlalchemy import Engine
 from sqlmodel import Session, select
 
 from api.db import engine as default_engine
 from api.models import Listing, SavedSearch
 from connectors.ebay import EbayClient
+from connectors.image_hash import fetch_and_hash
 from connectors.normalizer import normalize_ebay_item
+
+ImageHasher = Callable[[str], "str | None"]
 
 
 def ingest_saved_search(
-    saved_search: SavedSearch, client: EbayClient | None = None, db_engine: Engine | None = None
+    saved_search: SavedSearch,
+    client: EbayClient | None = None,
+    db_engine: Engine | None = None,
+    image_hasher: ImageHasher = fetch_and_hash,
 ) -> int:
     """client/db_engine are injectable so tests can run against a fake client
-    and a throwaway DB instead of hitting eBay or Postgres.
+    and a throwaway DB instead of hitting eBay or Postgres. image_hasher is
+    injectable too, so tests don't need real network access to hash images
+    (see docs/decisions/0002-image-hash-dedup.md).
 
     saved_search.location isn't passed to eBay yet: the Browse API doesn't
     support free-text proximity search the way this schema implies (it only
@@ -44,8 +54,12 @@ def ingest_saved_search(
             if existing:
                 existing.price = listing.price
                 existing.last_seen_at = listing.last_seen_at
+                if existing.image_hash is None and existing.images:
+                    existing.image_hash = image_hasher(existing.images[0])
                 session.add(existing)
             else:
+                if listing.images:
+                    listing.image_hash = image_hasher(listing.images[0])
                 session.add(listing)
 
             upserted += 1
@@ -55,7 +69,11 @@ def ingest_saved_search(
     return upserted
 
 
-def ingest_all(client: EbayClient | None = None, db_engine: Engine | None = None) -> int:
+def ingest_all(
+    client: EbayClient | None = None,
+    db_engine: Engine | None = None,
+    image_hasher: ImageHasher = fetch_and_hash,
+) -> int:
     """Runs ingest_saved_search for every SavedSearch row in the DB. There's
     no saved-search UI or CRUD yet (that's stage 5); rows come from the seed
     migration or get added by hand for now."""
@@ -65,7 +83,9 @@ def ingest_all(client: EbayClient | None = None, db_engine: Engine | None = None
 
     total = 0
     for saved_search in saved_searches:
-        total += ingest_saved_search(saved_search, client=client, db_engine=db_engine)
+        total += ingest_saved_search(
+            saved_search, client=client, db_engine=db_engine, image_hasher=image_hasher
+        )
     return total
 
 

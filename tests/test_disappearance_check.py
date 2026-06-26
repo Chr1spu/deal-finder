@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from sqlmodel import Session, select
 
 from api.models import Listing, ListingStatus
-from connectors.disappearance_check import check_ebay_listings
+from connectors.disappearance_check import check_all_sources, check_ebay_listings
 
 
 class FakeEbayClient:
@@ -17,10 +17,12 @@ class FakeEbayClient:
         return None if item_id in self._gone else {"itemId": item_id}
 
 
-def seed_listing(session: Session, source_id: str, status: ListingStatus = ListingStatus.active) -> None:
+def seed_listing(
+    session: Session, source_id: str, source: str = "ebay", status: ListingStatus = ListingStatus.active
+) -> None:
     session.add(
         Listing(
-            source="ebay",
+            source=source,
             source_id=source_id,
             title=f"item {source_id}",
             price=10.0,
@@ -65,3 +67,35 @@ def test_only_checks_active_listings_not_already_sold_ones(test_engine):
     checked, marked_sold = check_ebay_listings(client=FakeEbayClient(gone=set()), db_engine=test_engine)
 
     assert (checked, marked_sold) == (0, 0)
+
+
+def test_check_all_sources_loops_every_registered_source(test_engine, monkeypatch):
+    """PULL_BASED_SOURCES only has "ebay" registered today (Depop doesn't
+    exist yet), so fake out a second source to prove the loop itself works
+    per-source rather than being hardcoded to eBay."""
+
+    class FakeGoneClient:
+        def get_item(self, item_id: str) -> dict | None:
+            return None
+
+    class FakeStillActiveClient:
+        def get_item(self, item_id: str) -> dict | None:
+            return {"id": item_id}
+
+    monkeypatch.setattr(
+        "connectors.disappearance_check.PULL_BASED_SOURCES",
+        {"ebay": FakeGoneClient, "depop": FakeStillActiveClient},
+    )
+
+    with Session(test_engine) as session:
+        seed_listing(session, "ebay-1", source="ebay")
+        seed_listing(session, "depop-1", source="depop")
+
+    checked, marked_sold = check_all_sources(db_engine=test_engine)
+
+    assert (checked, marked_sold) == (2, 1)
+    with Session(test_engine) as session:
+        ebay_listing = session.exec(select(Listing).where(Listing.source_id == "ebay-1")).one()
+        depop_listing = session.exec(select(Listing).where(Listing.source_id == "depop-1")).one()
+        assert ebay_listing.status == ListingStatus.likely_sold
+        assert depop_listing.status == ListingStatus.active

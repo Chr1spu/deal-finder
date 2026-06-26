@@ -14,6 +14,8 @@ dependencies = [
     "httpx>=0.28,<0.29",
     "pydantic-settings>=2.7,<2.8",
     "python-dotenv>=1.0,<1.1",
+    "imagehash>=4.3,<4.4",
+    "pillow>=11.0,<12.0",
 ]
 
 [dependency-groups]

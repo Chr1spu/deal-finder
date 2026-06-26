@@ -11,6 +11,7 @@ import time
 import httpx
 
 from api.settings import settings
+from systems.ratelimit import call_with_backoff
 
 _HOSTS = {
     "sandbox": {
@@ -47,15 +48,19 @@ class EbayClient:
                 "developer.ebay.com and add them to .env"
             )
 
-        resp = httpx.post(
-            self._hosts["auth"],
-            auth=(self.client_id, self.client_secret),
-            data={
-                "grant_type": "client_credentials",
-                "scope": "https://api.ebay.com/oauth/api_scope",
-            },
-        )
-        resp.raise_for_status()
+        def do_request() -> httpx.Response:
+            resp = httpx.post(
+                self._hosts["auth"],
+                auth=(self.client_id, self.client_secret),
+                data={
+                    "grant_type": "client_credentials",
+                    "scope": "https://api.ebay.com/oauth/api_scope",
+                },
+            )
+            resp.raise_for_status()
+            return resp
+
+        resp = call_with_backoff(do_request)
         body = resp.json()
 
         self._token = body["access_token"]
@@ -65,23 +70,34 @@ class EbayClient:
     def search_items(self, query: str, limit: int = 50) -> list[dict]:
         """Search active listings. Returns raw itemSummaries from the API."""
         token = self._get_access_token()
-        resp = httpx.get(
-            f"{self._hosts['browse']}/item_summary/search",
-            headers={"Authorization": f"Bearer {token}"},
-            params={"q": query, "limit": limit},
-        )
-        resp.raise_for_status()
+
+        def do_request() -> httpx.Response:
+            resp = httpx.get(
+                f"{self._hosts['browse']}/item_summary/search",
+                headers={"Authorization": f"Bearer {token}"},
+                params={"q": query, "limit": limit},
+            )
+            resp.raise_for_status()
+            return resp
+
+        resp = call_with_backoff(do_request)
         return resp.json().get("itemSummaries", [])
 
     def get_item(self, item_id: str) -> dict | None:
         """Fetch a single item by ID, used by disappearance tracking. Returns
         None if the item is gone (404), which is our signal it likely sold."""
         token = self._get_access_token()
-        resp = httpx.get(
-            f"{self._hosts['browse']}/item/{item_id}",
-            headers={"Authorization": f"Bearer {token}"},
-        )
+
+        def do_request() -> httpx.Response:
+            resp = httpx.get(
+                f"{self._hosts['browse']}/item/{item_id}",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            if resp.status_code != 404:
+                resp.raise_for_status()
+            return resp
+
+        resp = call_with_backoff(do_request)
         if resp.status_code == 404:
             return None
-        resp.raise_for_status()
         return resp.json()
