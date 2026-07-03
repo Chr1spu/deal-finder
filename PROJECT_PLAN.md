@@ -93,6 +93,16 @@ Verified for real on 2026-06-26: migration applied against the real Postgres, a 
 - [ ] Docker Compose full stack, deploy api/worker + frontend
 - [ ] Write up README, polish devlog
 
+### Post-completion backlog: perfecting the Deal Scanner
+
+Things worth revisiting once stages 1-7 above are actually done, not blockers to finishing them. Roughly ordered by how much they'd actually improve the system, not by ease.
+
+- **Parallelize ingestion.** `ingest_all()` currently runs every saved search sequentially, one at a time, and image-hashing new listings is sequential too, both fully I/O-bound (waiting on network round-trips). A `ThreadPoolExecutor` (or splitting into one RQ job per saved search, drained by multiple workers) could cut real run time drastically. Relatively easy to add given the current code already opens its own DB session per search call; the main care needed is capping concurrency so it doesn't overwhelm eBay's rate limits.
+- **Paginate past the 200-result cap.** Each saved search only ever sees eBay's first 200 results per run (its per-call max); a keyword with more active listings than that never has its later results seen at all. Needs looping with eBay's `offset` parameter until a keyword's results are exhausted, with a sane upper bound.
+- **Capture shipping cost.** `price` is item price only right now; shipping isn't stored anywhere. This one is more than a nice-to-have: comparing deals on item price alone is a real correctness bug once stage 4's valuation engine is scoring "how good a deal" something is (a cheaper item with expensive shipping can be the worse deal). Worth doing before or alongside stage 4, not deferred indefinitely.
+- **More sophisticated rate limiting at real scale.** The current retry/backoff (`systems/ratelimit.py`) is reactive, per-call. If saved-search count and worker concurrency both grow a lot, a shared proactive throttle (e.g. a token bucket backed by Redis, since multiple workers would need to agree on one budget) may become worth it. Not a real concern at the current scale.
+- **A data retention/archival policy.** Nothing ever deletes a listing, on purpose, since sold listings are the comp data the valuation engine needs. Table size is a non-issue for a long time at any realistic scale (see DEVLOG), but a real project running for years might eventually want a policy for archiving very old sold listings rather than never revisiting the question.
+
 ---
 
 ## 2. Future Directions: The Bundle Engine (design now, build later)

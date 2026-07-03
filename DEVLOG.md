@@ -1,5 +1,28 @@
 # Devlog
 
+## 2026-07-03 - Going to real production data, at real scale
+
+**Did:**
+- Switched `.env` from eBay sandbox to production (real Client ID/Secret), kept the old sandbox keyset commented out for reference.
+- Added a default condition filter to `EbayClient.search_items()` (`exclude_new=True`), excluding condition IDs 1000/1500/1750 (New, New other, New with defects) and keeping refurbished/used/for-parts. Verified the exact filter syntax against the real production API before committing to it, rather than trusting docs/memory. This is a secondhand deal finder, brand-new listings have no resale depreciation to find a deal in.
+- Raised `search_items()`'s default `limit` from 50 to 200, eBay Browse API's actual per-call max. Verified live that eBay actually honors 200.
+- Seeded 63 new saved searches: every current Nintendo Switch variant (Lite, OLED, 2), iPhone 15 and newer (through the 17 line, plus 16e/Air), and a representative spread of recent CPUs, GPUs, RAM, and storage. 64 total now, up from 1.
+- Bumped RQ's per-job timeout to 1 hour for both the ingest and disappearance-check jobs (`systems/queue.py`), since the default 180s would've killed a real run of this size partway through. Found this before it became a real problem, not after.
+- Ran the first full ingest across all 64 searches for real: 11,263 upserts processed, 10,073 unique listings landed (the gap is overlap between different searches matching the same real item, expected), 99.9% got a real `image_hash`. Took about 30-35 minutes for this first run (every listing was new, so every one triggered an image download). Table size after: 9.16 MB for 10,073 rows, ~930 bytes/row at real scale, well below the earlier small-sample estimate.
+- Added a "Post-completion backlog" section to `PROJECT_PLAN.md`: parallelizing ingestion (currently fully sequential, a real opportunity now that there's real volume), pagination past the 200-result cap, capturing shipping cost (flagged as more than a nice-to-have, a real correctness gap for stage 4's scoring), rate limiting at larger scale, and eventual data retention.
+
+**Decided:**
+- Condition filter excludes New/New-other/New-with-defects only, keeps all refurbished and used grades plus for-parts, since those are exactly where secondhand deals actually exist.
+- 200 as the per-search cap, not more: it's eBay's actual maximum per call, going beyond it needs real pagination, deferred to the backlog above rather than solved today.
+- Job timeouts bumped to a round, generous 1 hour rather than tuned precisely, since the actual runtime at this scale wasn't known ahead of time.
+
+**Broke / debugged:**
+- N/A this session, though the job-timeout issue above was caught proactively (reasoned about job duration at the new scale before running it for real) rather than discovered by a job dying mid-run.
+
+**Next:**
+- Scheduler + worker aren't running continuously yet, on request, until the user is ready. Once turned on: hourly ingestion, disappearance-checking every 6 hours, both against all 64 searches.
+- The "Post-completion backlog" items are explicitly deferred, not needed to keep using the system as-is.
+
 ## 2026-06-26 - Stage 2: systems layer built and verified end to end
 
 **Did:**

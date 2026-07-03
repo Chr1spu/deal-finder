@@ -32,11 +32,20 @@ def get_queue() -> Queue:
     return Queue(QUEUE_NAME, connection=Redis.from_url(settings.redis_url))
 
 
+# RQ's default job timeout (180s) isn't enough once there are dozens of saved
+# searches, each potentially hashing images for many new listings - a single
+# run can legitimately take much longer than a couple of small test searches
+# did. Generous timeouts here, not tuned precisely, just enough to not get
+# killed mid-run as the number of saved searches grows.
+INGEST_JOB_TIMEOUT = "1h"
+DISAPPEARANCE_CHECK_JOB_TIMEOUT = "1h"
+
+
 def enqueue_ingest_all(queue: Queue | None = None):
     queue = queue or get_queue()
-    return queue.enqueue(ingest_all)
+    return queue.enqueue(ingest_all, job_timeout=INGEST_JOB_TIMEOUT)
 
 
 def enqueue_disappearance_check(queue: Queue | None = None):
     queue = queue or get_queue()
-    return queue.enqueue(check_all_sources)
+    return queue.enqueue(check_all_sources, job_timeout=DISAPPEARANCE_CHECK_JOB_TIMEOUT)

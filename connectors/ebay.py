@@ -13,6 +13,13 @@ import httpx
 from api.settings import settings
 from systems.ratelimit import call_with_backoff
 
+# eBay condition IDs to include when excluding "new" listings: refurbished
+# (manufacturer/seller, all grades), used (all grades), and for-parts. Omits
+# 1000 (New), 1500 (New other), 1750 (New with defects) - this project is a
+# secondhand deal finder, and "new" listings have no resale depreciation to
+# find a deal in. Verified against the real Browse API (see LEARNING_LOG.md).
+NON_NEW_CONDITION_IDS = "2000|2010|2020|2030|2500|3000|4000|5000|6000|7000"
+
 _HOSTS = {
     "sandbox": {
         "auth": "https://api.sandbox.ebay.com/identity/v1/oauth2/token",
@@ -67,15 +74,27 @@ class EbayClient:
         self._token_expires_at = time.monotonic() + body["expires_in"] - 60
         return self._token
 
-    def search_items(self, query: str, limit: int = 50) -> list[dict]:
-        """Search active listings. Returns raw itemSummaries from the API."""
+    def search_items(self, query: str, limit: int = 200, exclude_new: bool = True) -> list[dict]:
+        """Search active listings. Returns raw itemSummaries from the API.
+
+        limit defaults to 200, eBay Browse API's actual per-call maximum -
+        there's no pagination beyond that yet, so a keyword with more than
+        200 active matches will still only surface its first 200 per run.
+
+        exclude_new defaults to True: this is a secondhand deal finder, and a
+        brand-new/sealed listing has no resale depreciation to find a deal
+        in. Set False if a search genuinely needs new-condition results too.
+        """
         token = self._get_access_token()
+        params = {"q": query, "limit": limit}
+        if exclude_new:
+            params["filter"] = f"conditionIds:{{{NON_NEW_CONDITION_IDS}}}"
 
         def do_request() -> httpx.Response:
             resp = httpx.get(
                 f"{self._hosts['browse']}/item_summary/search",
                 headers={"Authorization": f"Bearer {token}"},
-                params={"q": query, "limit": limit},
+                params=params,
             )
             resp.raise_for_status()
             return resp

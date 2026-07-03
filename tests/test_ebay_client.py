@@ -29,6 +29,32 @@ def test_search_items_returns_item_summaries():
 
 
 @respx.mock
+def test_search_items_excludes_new_condition_by_default():
+    respx.post(AUTH_URL).mock(
+        return_value=Response(200, json={"access_token": "fake-token", "expires_in": 7200})
+    )
+    route = respx.get(SEARCH_URL).mock(return_value=Response(200, json={"itemSummaries": []}))
+
+    make_client().search_items("rtx 4090")
+
+    sent_filter = route.calls.last.request.url.params["filter"]
+    assert sent_filter == "conditionIds:{2000|2010|2020|2030|2500|3000|4000|5000|6000|7000}"
+    assert "1000" not in sent_filter, "condition 1000 is New, must not be included"
+
+
+@respx.mock
+def test_search_items_can_opt_out_of_condition_filter():
+    respx.post(AUTH_URL).mock(
+        return_value=Response(200, json={"access_token": "fake-token", "expires_in": 7200})
+    )
+    route = respx.get(SEARCH_URL).mock(return_value=Response(200, json={"itemSummaries": []}))
+
+    make_client().search_items("rtx 4090", exclude_new=False)
+
+    assert "filter" not in route.calls.last.request.url.params
+
+
+@respx.mock
 def test_get_item_returns_none_when_listing_is_gone():
     respx.post(AUTH_URL).mock(
         return_value=Response(200, json={"access_token": "fake-token", "expires_in": 7200})

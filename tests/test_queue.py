@@ -22,6 +22,7 @@ def test_enqueue_ingest_all_schedules_the_real_ingest_function():
     assert len(queue.enqueued) == 1
     fn, args, kwargs = queue.enqueued[0]
     assert fn is ingest_all
+    assert "job_timeout" in kwargs, "needs a longer-than-default timeout, see systems/queue.py"
 
 
 def test_enqueue_disappearance_check_schedules_the_real_check_function():
@@ -32,3 +33,4 @@ def test_enqueue_disappearance_check_schedules_the_real_check_function():
     assert len(queue.enqueued) == 1
     fn, args, kwargs = queue.enqueued[0]
     assert fn is check_all_sources
+    assert "job_timeout" in kwargs, "needs a longer-than-default timeout, see systems/queue.py"
