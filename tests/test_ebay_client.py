@@ -21,11 +21,28 @@ def test_search_items_returns_item_summaries():
         return_value=Response(200, json={"access_token": "fake-token", "expires_in": 7200})
     )
     item = json.loads(FIXTURE.read_text())
-    respx.get(SEARCH_URL).mock(return_value=Response(200, json={"itemSummaries": [item]}))
+    respx.get(SEARCH_URL).mock(
+        return_value=Response(200, json={"itemSummaries": [item], "total": 4321})
+    )
 
-    results = make_client().search_items("nintendo switch")
+    result = make_client().search_items("nintendo switch")
 
-    assert results == [item]
+    assert result.items == [item]
+    assert result.total == 4321, "the reported total is what makes truncation measurable"
+
+
+@respx.mock
+def test_search_items_sends_an_explicit_marketplace_header():
+    """Relying on eBay's default would silently re-point the whole corpus at
+    another country's market if that default ever changed."""
+    respx.post(AUTH_URL).mock(
+        return_value=Response(200, json={"access_token": "fake-token", "expires_in": 7200})
+    )
+    route = respx.get(SEARCH_URL).mock(return_value=Response(200, json={"itemSummaries": []}))
+
+    make_client().search_items("nintendo switch")
+
+    assert route.calls.last.request.headers["X-EBAY-C-MARKETPLACE-ID"] == "EBAY_US"
 
 
 @respx.mock

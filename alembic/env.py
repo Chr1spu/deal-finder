@@ -4,7 +4,11 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 from sqlmodel import SQLModel
 
-from api.models import Listing, SavedSearch  # noqa: F401 (registers metadata)
+from api.models import (  # noqa: F401 (registers metadata)
+    Listing,
+    PriceObservation,
+    SavedSearch,
+)
 from api.settings import settings
 
 config = context.config

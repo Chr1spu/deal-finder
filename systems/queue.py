@@ -25,7 +25,10 @@ class WindowsWorker(SimpleWorker):
     dev on Windows: `rq worker deal-finder --worker-class systems.queue.WindowsWorker`.
     Plain `rq worker` is fine once this runs inside a Linux container (stage 7)."""
 
-    death_penalty_class = TimerDeathPenalty
+    # rq types this as UnixSignalDeathPenalty on the base class, which is
+    # exactly the assumption being overridden here, so the mismatch is the
+    # point rather than a mistake.
+    death_penalty_class = TimerDeathPenalty  # type: ignore[assignment]
 
 
 def get_queue() -> Queue:

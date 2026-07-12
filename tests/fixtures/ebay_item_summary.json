@@ -21,6 +21,11 @@
   "categories": [
     {"categoryId": "139971", "categoryName": "Video Game Consoles"}
   ],
+  "buyingOptions": ["FIXED_PRICE", "BEST_OFFER"],
+  "shippingOptions": [
+    {"shippingCostType": "FIXED", "shippingCost": {"value": "12.50", "currency": "USD"}},
+    {"shippingCostType": "FIXED", "shippingCost": {"value": "24.99", "currency": "USD"}}
+  ],
   "itemCreationDate": "2026-08-01T14:32:00.000Z",
   "itemWebUrl": "https://www.ebay.com/itm/123456789012"
 }
