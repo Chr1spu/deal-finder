@@ -1,5 +1,114 @@
 # Devlog
 
+## 2026-07-18 - eBay is the price oracle, everything else is a client
+
+**Did:**
+- Reworked the source model. **eBay is the price oracle** (ingested, disappearance-tracked, builds sold history, answers "what is this worth"), and **Depop and Facebook Marketplace are valuation clients** whose listings get scored *against* eBay value and contribute zero comps. Item variety on those sites is too high for per-item price history built from them to mean anything, and mixing them in would contaminate the one source that does have the volume and catalog structure to support it.
+- That makes `docs/decisions/0001-multi-source-connector-strategy.md` wrong rather than imprecise: it says outright that Depop "gets checked periodically by `disappearance_check.py` ... to build sold-price history", and `CLAUDE.md` and `PROJECT_PLAN.md` repeated it. Wrote `docs/decisions/0008-price-oracle-and-valuation-clients.md` superseding that half, and left 0001 unedited with a pointer at the top so the reasoning at the time stays readable.
+- The underlying mistake in 0001 was conflating two independent properties: *how a source is accessed* (pull vs push) and *whether its prices are trustworthy enough to price against*. Split them in code before Depop exists to get it wrong: `PULL_BASED_SOURCES` still means "polled on a schedule", and a new `COMP_SOURCES` frozenset gates disappearance checking. `check_all_sources` intersects them. A test asserts a polled non-comp source costs **zero** API calls and isn't even marked as checked, and another guards that `COMP_SOURCES` is still just eBay, since adding to it is an ADR-level decision.
+- **The hard problem of the project moved.** It is no longer "build comps from several sources", it is **cross-source item identification**: given a Facebook photo and a scrappy title, which eBay product is this? Nothing in the codebase addresses that yet.
+- That also settles the question that had stage 3 stuck. A Facebook or Depop listing has no `epid`, because that is an eBay catalog id. So `epid` is excellent for eBay-internal comps and **useless for the bridge**, which means image embeddings and text extraction are the only way to value a foreign listing. Stage 3 isn't weakened by the `epid` discovery; it is the mechanism the core use case depends on.
+- **Closed the delivered-cost gap.** Shipping was being captured carefully and used nowhere: there was no `price + shipping` anywhere in the codebase, and `Listing.price` (item price only) is the obvious field for stage 4 to reach for, which is exactly the correctness bug ADR 0004 flagged. Added a `Listing.total_cost` property.
+- Also found `shippingCostType` being ignored. eBay marks each option `FIXED` or `CALCULATED`, and a calculated cost depends on the buyer's location, so the figure returned may have been worked out for somewhere else. `_cheapest_shipping_cost` was reading the value without checking the type. It now prefers a `FIXED` option even when a `CALCULATED` one is cheaper, and flags `shipping_estimated` when only calculated options exist. Migration `0009`.
+- 136 tests passing (up from 126), mypy clean across 18 files.
+
+**Decided:**
+- `total_cost` returns `None` when shipping is unknown, deliberately rather than falling back to `price`. Silently treating unknown shipping as free is the same bug relocated, and it biases in the dangerous direction by making items look cheaper than they are. Callers must decide; `price_confidence` already records the doubt.
+- A `FIXED` option beats a cheaper `CALCULATED` one. A firm price that is slightly higher is better information than a cheaper guess made for an unknown location.
+- An absent or unrecognised `shippingCostType` is treated as firm, not estimated. eBay uses `FIXED` for the common case, so that is the better default than assuming the worst.
+- Estimated shipping costs less price confidence than unknown shipping (x0.95 versus x0.9). A calculated figure is at least the right order of magnitude.
+- `COMP_SOURCES` is a frozenset in one place rather than `WHERE source = 'ebay'` scattered through stage 4. The rule is a project-level decision and deserves one place to read it and one to change it.
+
+**Broke / debugged:**
+- `test_check_all_sources_loops_every_registered_source` failed immediately, which was the new behaviour working: it adds a fake `depop` to `PULL_BASED_SOURCES` and that source is now correctly excluded. Split it into two tests, one for the loop shape (patching both sets) and one for the exclusion itself.
+
+**Next:**
+- Stage 3a (CLIP embeddings), now with a clear purpose: **the eBay corpus becomes the reference index that items found elsewhere are matched against.** That asymmetry matters. eBay listings are the index and foreign listings are the queries, so eBay embedding coverage is worth more, and the two sides have different image distributions (clean CDN product shots versus a phone photo in a garage). The verification that matters is cross-source, not eBay-to-eBay.
+- `image_hash` also finally has its real purpose. ADR 0002 deferred cross-source matching as duplicate-merging; the actual use is identification, since a foreign seller reusing a stock photo can be matched instantly before any model runs.
+- Quota still resets 07:00Z. Unchanged: measure `epid` coverage, GTC share, auction share.
+
+## 2026-07-18 - Splitting sale confidence from price confidence
+
+**Did:**
+- Audited the confidence multipliers in `sale_confidence.py` by printing real scores across scenarios. Two problems fell out, one a bug and one structural.
+- **The bug:** an auction with 12 bids that ended at its scheduled end date scored **0.324**, below a listing about which nothing was known. Cause: the "ran to its published end date, so nobody bought it" penalty was being applied to auctions, and **auctions end at their scheduled date by definition**, sold or not. Every auction was being penalised for behaving like an auction. Fixed by restricting that signal to non-auction listings. Same case now scores 0.810.
+- **The structural problem the bug was hiding:** the score was answering **two different questions at once**. "Did this sell?" (relists, bid counts, running to term) and "is the recorded price what was paid?" (Best Offer discounts, mid-auction snapshots) are different uncertainties with different consequences, and multiplying them into one number makes them indistinguishable. A relisted item that probably never sold and a Best Offer sale that definitely happened at an unclear price both landed near 0.6-0.7.
+- Split them, per `docs/decisions/0007-two-confidences.md`. `sale_confidence` now answers only whether a sale happened; `price_confidence` answers only whether `price + shipping` is what the buyer handed over. Migration `0008`. The difference is stark: a Best Offer sale is now `sale 0.900 / price 0.750` while a relist is `sale 0.135 / price 1.000`. Both were around 0.135 to 0.675 before, on the same axis.
+- `price_confidence` starts at **1.0**, not at a hedge, because for a plain fixed-price listing with no offers the asking price simply *is* the price. Only specific known ambiguities reduce it. `sale_confidence` keeps its 0.75 base, because a sale is never actually observed.
+- Recorded the **direction** of price error, since it isn't symmetric: a Best Offer asking price is biased **over** (it sold at some discount), while an auction's last observed bid is biased **under** (bidding only goes up, so the hammer price is at least that). Stored as `price_bias` in signals. That leaves stage 4 the option of *correcting* a comp rather than merely discounting it, which is deliberately not attempted yet.
+- Added `shipping_unknown` as a mild price-confidence penalty, since what a buyer paid is price plus shipping and one of those can be null.
+- 126 tests passing, mypy clean, migrations through `0008` applied.
+
+**Decided:**
+- Two stored scores, and deliberately **no combined score alongside them**. A combined field would be the easiest thing to reach for and the one that reintroduces exactly the conflation this fixes. Stage 4 should be made to think about which question it's asking.
+- `sale_confidence` gates whether a listing enters the comp set; `price_confidence` weights how much its price moves the estimate. Written into the ADR so stage 4 doesn't have to reinvent the intent.
+- Migration blanks any existing `sale_confidence`, since its meaning narrowed. Nothing was actually lost (no sale has ever been confirmed in production), but leaving values whose definition silently changed would be worse than having none.
+- Keeping the multipliers as they are. The split doesn't improve their calibration and doesn't pretend to; what it does is make them **separately falsifiable**, so the relist weight can be corrected later without disturbing the Best Offer weight.
+
+**Broke / debugged:**
+- Renaming `SaleConfidence.score` to two fields broke 15 tests at once. Mechanical, but a reminder that a widely-asserted-on attribute is an interface.
+- Known limitation, left in deliberately: an auction with bids that vanished fast reaches `sale_confidence` 1.000 by clamping (0.75 x 1.5 x 1.2 = 1.35, clipped). The result is defensible, since bids on an ended auction really are close to proof of sale, but the clamp is doing work the multipliers should be doing.
+
+**Next:**
+- Unchanged: quota resets 07:00Z, then measure epid coverage, GTC share, and auction share.
+- Auction share matters more now. If auctions are a meaningful slice, they're the only comps in the system backed by a price somebody actually paid, and auction close polling moves up the list.
+
+## 2026-07-18 - Reading the rest of the response: epid, real end dates, and the getItem body whose quota we already spent
+
+**Did:**
+- Audited the Browse API's documented response schema against what the normalizer actually reads (couldn't verify live, quota at zero until 07:00Z). Found four fields worth having, none of which cost a single extra API call.
+- **`epid`, eBay's catalog product id.** Two listings sharing one are *definitively* the same product. That is exactly what stage 3a's CLIP embeddings and stage 3b's brand/model regex are both built to approximate, and eBay has been handing it over in every search response this whole time. Captured and indexed. Nothing consumes it yet on purpose: the first thing worth doing once real data lands is measuring coverage, because if it's high then exact catalog matching is a better comp key than either embeddings or extraction, and **stage 3 becomes much less load-bearing than the build order assumes.**
+- **`itemEndDate`, which fixes a heuristic I guessed at yesterday.** `sale_confidence.py` was inferring "ran to term" from a 30-day guess with a tolerance window. eBay publishes the actual scheduled end. Better still, **eBay omits the field for Good 'Til Cancelled listings**, so its absence identifies GTC, which is exactly the auto-renewing listing type that manufactures the false sales relist detection exists to catch. Recorded that reading as `is_gtc` so the meaning of a null isn't rediscovered every time someone reads the table. The 30-day guess stays as a fallback for GTC listings and for rows ingested before this change.
+- **`bidCount`, which is close to decisive for auctions.** An auction that disappears having never received a bid did not sell; one that disappears with bids did, and somebody actually paid roughly that. That is the strongest comp data available anywhere in this system, and it needs no inference at all. Scores 0.05 with no bids, 1.5x with bids.
+- **The `getItem` response body.** `check_listings_for_source` has been calling `getItem` on every candidate and reading only whether it 404s, throwing away `localizedAspects` (structured Brand / Model / Storage Capacity name-value pairs) and `estimatedAvailabilities.estimatedSoldQuantity` (real units sold, not inferred). Now harvested via `enrich_from_item_body()`. This was the single most wasteful thing in the codebase: the call was already made and its quota already spent.
+- Also captured seller feedback score and percentage, and `qualifiedPrograms` (Authenticity Guarantee and similar move price materially in some categories).
+- Wrote `docs/decisions/0006-capture-what-ebay-already-sends.md` first. Migration `0007`. 25 new tests, 121 passing, mypy clean across 18 files.
+
+**Decided:**
+- `epid` gets captured and indexed but nothing reads it yet. Measuring coverage has to come before designing around it, and building a catalog-matching path against an assumed coverage rate would be exactly the kind of guessing this project keeps avoiding.
+- `aspects` and `qualified_programs` stay raw JSON, unindexed. Aspect names vary by category ("Model" here, "Chipset/GPU Model" there) and coverage is unknown, so stage 3b should decide what earns a typed column against real data.
+- `enrich_from_item_body` is strictly additive: it fills fields but never blanks one that already has a value. A getItem response missing a field must not erase what ingestion previously learned.
+- `_sold_quantity` handles `estimatedAvailabilities` as both an array and a bare object, because eBay's docs show it both ways and it hasn't been seen live. Picking one and being silently wrong would leave the column null forever with nothing to notice.
+- Deferred polling auctions just before `itemEndDate` to capture a near-final bid. It would produce the best comp data in the system and the budget has room, but it needs per-listing timed scheduling the sleep-loop scheduler doesn't do, and `bid_count` at disappearance already delivers most of the signal. Revisit once auctions are measured as a real share of the corpus.
+
+**Broke / debugged:**
+- Nothing broke. Changing `search_items` to return `SearchResult` touched 11 test files' fakes at once, and the existing suite caught every one immediately.
+
+**Reversed:**
+- The stage 3b plan had rejected fetching `localizedAspects` because the call budget forbade an extra `getItem` per listing. That only applies to *adding* calls, and the disappearance check already makes them. For any listing the checker touches, structured aspects cost nothing extra, which materially weakens the case for regex-extracting brand and model out of titles. Stage 3b gets replanned once there's data on how many listings carry useful aspects.
+
+**Next:**
+- Quota resets 07:00Z. First real ingest populates all of this. Three numbers worth reading immediately: **epid coverage** (decides how much stage 3 matters), the share of listings that are GTC (decides how big the relist problem is), and what fraction is auctions (decides whether auction close polling is worth building).
+- None of these field shapes have been seen in a live response from this app. Confirm before trusting them, same as the shipping and buying-option columns.
+
+## 2026-07-18 - A disappearance is not a sale: scoring comp confidence
+
+**Did:**
+- Attacked the dominant weakness in the valuation data: **the sold prices aren't sold prices.** A listing vanishes when it sells, but also when it expires unsold, when the seller pulls it, and when a Best Offer is accepted well below the asking price we record. Every one of those biases the comp *upward*, so the median comp sits above true market and everything scores as a better deal than it is. Bias toward false positives is the worst direction for a deal finder.
+- Investigated the obvious fix, scraping the sold prices eBay publishes in its own web UI, and **rejected it on the evidence rather than on principle.** eBay's `robots.txt` disallows `/sch/` with three separate rules covering the sold-search path specifically, and the file header states that automated access without express permission is prohibited, pointing to the official API instead. That is materially more explicit than the undocumented endpoints ADR 0001 accepted for Depop, and the eBay account at risk is the same identity as the developer keyset.
+- So: get the accuracy from data already held, which turned out to be more than expected. Wrote `docs/decisions/0005-sale-confidence.md`, then built `connectors/sale_confidence.py` around three signals, none of which cost an API call.
+- **Relist detection, the strongest one.** When a listing disappears, look for another listing from the same source using the same `image_hash`. eBay fixed-price listings auto-renew under brand new item ids constantly, so a matching photo elsewhere means the seller relisted and the item never sold. This finally uses the `image_hash` column ADR 0002 built and left unused: that ADR deferred *cross-source* matching pending Depop, but *same-source relist detection* is a different and more immediately valuable use of the same data.
+- **Listing lifetime.** `missing_since - posted_at` separates a listing gone in three days (probably sold) from one gone at roughly a 30 day term (probably lapsed). Checked at multiples too, since GTC auto-renews.
+- **Best Offer and auction discounts.** Both were captured in the last session and unused. A Best Offer listing sold at an unknown discount to the recorded price; an auction's recorded price is a mid-bid snapshot.
+- These combine multiplicatively into `sale_confidence` (a float in [0,1]) plus a `sale_signals` JSON breakdown, written at the moment a sale is confirmed. Migration `0006`. 20 new tests, 96 passing, mypy clean across all 18 source files.
+- Also reframed `CLAUDE.md`'s "Constraints to respect" section, which read as absolute. Most of those constraints are engineering judgments with reasons and are revisitable; the eBay access boundary is the one that isn't, and it now says why, with the robots.txt evidence, so the question doesn't get re-litigated from memory later.
+
+**Decided:**
+- Score confidence, don't filter. A relisted item still gets marked `likely_sold` (the original listing genuinely is gone) but carries a confidence under 0.2, so stage 4 can weight it near zero without the pipeline having to make an irreversible keep/discard call on a heuristic.
+- Multiplicative rather than additive penalties. The signals are close to independent, and a listing that is both a probable relist *and* vanished at term should score worse than either alone; additive penalties would let a strong signal get diluted by weak ones.
+- A relist scores 0.15, not 0.0. `image_hash` matches on stock photography, which is common for boxed retail goods, so a photo match is strong evidence rather than proof.
+- Store the score at confirmation time, not compute it in stage 4. Relist detection depends on what the database looked like around the disappearance, and the same query run months later would be looking at a different world.
+- A missing `posted_at` or `image_hash` skips its signal rather than guessing. Absence of evidence must not read as "definitely sold".
+- Keep the per-signal breakdown in `sale_signals`. These thresholds are guesses until there's real data to fit them against, and a single opaque number would make a bad heuristic impossible to spot.
+
+**Broke / debugged:**
+- The new DB tests hit `DetachedInstanceError`: the seed helper called `session.refresh()` and then let the `with` block close the session, so the first attribute read afterwards failed. Fixed with `refresh` then `expunge`, which loads the values before detaching.
+
+**Next:**
+- This makes the problem **measurable for the first time**, which is most of the point. Once real sales land, the two numbers worth reading immediately are the share of confirmed sales flagged as relists, and the distribution of `lifetime_days`. Both are currently unknown, and the honest accuracy of the whole deal scanner depends on them.
+- If relists turn out to be a large fraction, that's a real argument for the user-driven browser-extension route to sold prices (the ADR 0001 pattern, applied to eBay), backed by numbers rather than a hunch.
+- Stage 3 still next after that.
+
 ## 2026-07-12 - Auditing the intake path: capturing what was being thrown away
 
 **Did:**
@@ -32,7 +141,7 @@
 ## 2026-07-12 - Stage 2.5: the pipeline had been silently down for hours
 
 **Did:**
-- Went to start stage 3 (CLIP embeddings), checked whether the live pipeline was actually running first, and found it wasn't. The RQ worker read `successful_job_count: 1, failed_job_count: 9`. Every job since 16:36 UTC had failed with `429 Too Many Requests` on the very first saved search. Nothing was watching, so it just sat there dead for about 7 hours.
+- Found the live pipeline dead, during a routine check before starting stage 3. The RQ worker read `successful_job_count: 1, failed_job_count: 9`. Every job since 16:36 UTC had failed with `429 Too Many Requests` on the very first saved search. Nothing was watching, so it sat dead for about 7 hours.
 - Measured the real quota instead of guessing at it, via eBay's Developer Analytics `getRateLimits`: **5,000 Browse calls/day**, shared between `search_items` and `get_item`, `remaining: 0`, resets 07:00 UTC. The disappearance check as built wanted one `get_item` per active listing, so 10,496 listings x 4 passes/day = ~42,000 calls against an allowance of 5,000. It blew the entire day's budget partway through its first pass and took ingestion down with it.
 - Probed the two eBay APIs that would have solved this outright, before designing around either. **Both are unavailable to this app.** The bulk `getItems` endpoint (20 ids per call, a 20x reduction) returns `403 errorId 1100`, and eBay refuses to even mint a token for the `buy.item.bulk` scope (`invalid_scope, exceeds the scope granted to the client`). Marketplace Insights, which returns *real sold prices* for the last 90 days and would largely replace disappearance tracking altogether, fails identically. Both are Limited Release APIs needing a separate application. Worth applying for; the rate-limit table even shows allocations for both, but an allocation is not a grant.
 - Wrote `docs/decisions/0003-ebay-call-budget.md` before touching any code, then rebuilt the check around three ideas. **One:** ingestion already refreshes `last_seen_at` whenever a listing turns up in a saved search, for free, and eBay only returns *active* listings from search, so a recently-seen listing is provably alive and never costs a `get_item`. It's a one-sided oracle (presence proves alive, absence proves nothing), which is exactly right, because it justifies skipping checks without ever justifying a false "sold". **Two:** whatever's left gets checked oldest-`last_seen_at` first, capped by a budget derived from the real remaining quota. **Three:** listings that never sell and never end get retired to a new `stale` status, which is the only thing that actually bounds the candidate set.
@@ -42,7 +151,7 @@
 - Migration `0004`: `last_checked_at`, plus indexes on it and `last_seen_at` (both are on the hot path now). The new `stale` status needed no DDL, since `status` is a plain String column rather than a native Postgres enum.
 - 26 new/updated tests, 56 passing. Applied the migration against the real Postgres and ran a real check pass: it correctly resolved a budget of **0** against the exhausted quota, spent nothing, retired nothing, and exited cleanly, where the old code would have thrown an unhandled 429.
 - Surveyed every other eBay API that could possibly give more calls or better data, by calling each one rather than reading about it. **All closed.** Bulk `getItems`: 403, scope refused. Marketplace Insights: 403, scope refused. Buy Feed (the 10,000 and 75,000/day buckets in the rate-limit table): scope refused, 404. Legacy Shopping API `GetMultipleItems`: `open.api.ebay.com` no longer resolves in DNS at all. Legacy Finding API `findCompletedItems`, which returned genuinely sold listings: HTTP 418, retired. Worth writing down the general lesson: **eBay publishes rate-limit meters for APIs an application has not been granted**, so a big allowance in `getRateLimits` is not evidence of access. Browse's 5,000/day is the whole budget, and applying for the Limited Release scopes is the only way to change that.
-- **Found and fixed a bug in this session's own work while doing the capacity math.** A confirmed-alive listing was having `last_seen_at` refreshed by the check (carried over from stage 2's behavior). But `last_seen_at` now drives both the proven-alive skip *and* retirement, so any listing in the check rotation had its unseen clock reset every pass and could never age past `unseen_after_days`. Retirement was unreachable for exactly the listings it exists for: alive, permanently below eBay's 200-result cap, costing a call every pass forever. Fixed by keeping the two signals separate (`last_seen_at` means seen in search, `last_checked_at` means we paid for a call), and reordering candidates by least-recently-checked, which also spreads a fixed budget fairly instead of re-picking the same few listings. Two regression tests, 58 passing.
+- **Retirement was unreachable, a bug introduced earlier this session.** A confirmed-alive listing was having `last_seen_at` refreshed by the check (carried over from stage 2's behavior). But `last_seen_at` now drives both the proven-alive skip *and* retirement, so any listing in the check rotation had its unseen clock reset every pass and could never age past `unseen_after_days`. Retirement was unreachable for exactly the listings it exists for: alive, permanently below eBay's 200-result cap, costing a call every pass forever. Fixed by keeping the two signals separate (`last_seen_at` means seen in search, `last_checked_at` means we spent a call on it), and reordering candidates by least-recently-checked, which also spreads a fixed budget fairly instead of re-picking the same few listings. Two regression tests, 58 passing.
 
 **Capacity, worked out properly:**
 - Current spend is 1,536 ingest plus 2,800 checking = 4,336 of 5,000, so it runs continuously and indefinitely with 664 to spare.

@@ -41,10 +41,10 @@ This is the heart of the project: scan listings across marketplaces, and for eac
 ### Practical notes
 
 - **eBay**: official Browse API for active listings. Reliable, so start here.
-- **Depop**: no official public API; unofficial endpoints are commonly used for hobby projects. Treat as best-effort, expect breakage. Pull-based like eBay: a scheduled connector polls it and gets folded into disappearance-tracking.
+- **Depop**: no official public API; unofficial endpoints are commonly used for hobby projects. Treat as best-effort, expect breakage. Polled on a schedule like eBay, but **not folded into disappearance-tracking and not a comp source**: it is polled so its listings can be automatically scored against eBay-derived value, never to build price history of its own. See `docs/decisions/0008-price-oracle-and-valuation-clients.md`.
 - **Facebook Marketplace**: ToS prohibits scraping and it's login-walled with strong bot detection, so there's no server-side connector for it at all. Push-based instead: a browser extension running in the user's own logged-in session captures one listing at a time on click and posts it to the API. See `docs/decisions/0001-multi-source-connector-strategy.md`. No automated disappearance-tracking is possible for Facebook listings, only manual re-capture.
 - **OfferUp**: not yet in scope. Deferred until it's actually prioritized; will get the same pull-vs-push evaluation Depop and Facebook Marketplace just got.
-- "Recently sold" data generally isn't handed to you, so plan to build it yourself via disappearance-tracking, since it needs time to accumulate. Applies to pull-based sources (eBay, Depop); push-based sources like Facebook rely on manual re-capture instead.
+- "Recently sold" data generally isn't handed to you, so plan to build it yourself via disappearance-tracking, since it needs time to accumulate. **Applies to eBay only.** eBay is the price oracle; Depop and Facebook Marketplace are valuation clients whose listings get scored *against* eBay value and contribute no comps, because item variety there is too high for per-item price history built from them to mean anything. That makes the hard problem cross-source item identification rather than multi-source comp collection, since a foreign listing carries no eBay catalog id. See `docs/decisions/0008-price-oracle-and-valuation-clients.md`.
 
 ### Roadmap (build order)
 
@@ -76,10 +76,12 @@ Reopened as stage 2.5 on 2026-07-12: stage 2 was code-complete but had stopped w
 - [ ] CLIP embeddings pipeline on listing images, stored in pgvector
 - [ ] NLP extraction (brand/model/size/condition)
 
+Open question before starting this stage, added 2026-07-18: **measure `epid` coverage first.** eBay's catalog product id was being discarded by the normalizer and is now captured (`docs/decisions/0006-capture-what-ebay-already-sends.md`). Two listings sharing an `epid` are definitively the same product, which is what both items above only approximate. If coverage is high, exact catalog matching is a better comp key than embeddings or regex, and this stage becomes much less load-bearing than the build order assumes. The `getItem` body the disappearance check already fetches also carries `localizedAspects` (structured Brand/Model/Capacity), which weakens the case for regex-extracting the same facts from titles. Neither replaces this stage for listings with no catalog match, so it still gets built, but it should be replanned against real coverage numbers rather than the original assumption.
+
 **4. Valuation engine**
 
 - [ ] k-NN comp retrieval against pgvector
-- [ ] Deal scoring logic + confidence weighting
+- [ ] Deal scoring logic + confidence weighting (the confidence input now exists: `Listing.sale_confidence`, written when a disappearance is confirmed, with the per-signal breakdown in `sale_signals`. Comps must be weighted by it, not counted equally, and confirmed relists excluded. See `docs/decisions/0005-sale-confidence.md`.)
 
 **5. Backend API**
 

@@ -52,5 +52,21 @@ class Settings(BaseSettings):
     stale_after_days: int = 60
     unseen_after_days: int = 30
 
+    # Sale confidence, see docs/decisions/0005-sale-confidence.md. A
+    # disappearance is not a sale, so every inferred sale gets scored rather
+    # than trusted. Both of these are guesses until there's real data to fit
+    # them against, which is much of the point of storing the breakdown.
+    #
+    # relist_grace_days: how far back to look for another listing reusing the
+    # same photo. Too short misses relists posted before the old one lapsed;
+    # too long starts matching genuinely different sales of similar items.
+    relist_grace_days: int = 21
+    # A listing gone this fast is more likely to have really sold.
+    quick_sale_days: float = 7.0
+    # How close to its published end date a disappearance counts as "ran to
+    # term" (i.e. nobody bought it). Generous because the check runs on a
+    # 6-hourly interval, so it notices a disappearance well after it happened.
+    scheduled_end_tolerance_hours: float = 12.0
+
 
 settings = Settings()

@@ -45,7 +45,16 @@ class Listing(SQLModel, table=True):
     # item price alone is a correctness bug once stage 4 is scoring them.
     # eBay returns this in the same itemSummary payload ingestion already
     # fetches, so capturing it costs no extra API calls.
+    #
+    # This matters most across sources: a Facebook pickup has zero shipping,
+    # so an eBay comp at 500 plus 30 delivery means the item is worth 530
+    # delivered, and a 450 local cash listing beats a naive price comparison.
     shipping_cost: float | None = None
+
+    # True when eBay only offered a CALCULATED shipping cost, which depends on
+    # the buyer's location, so the figure stored may be for somewhere else.
+    # Treated like partially-unknown shipping when scoring price confidence.
+    shipping_estimated: bool = Field(default=False)
 
     # Derived from eBay's buyingOptions. Typed and indexed rather than kept as
     # a raw JSON list because stage 4's comp query has to filter on them, and
@@ -54,6 +63,47 @@ class Listing(SQLModel, table=True):
     # See docs/decisions/0004-trustworthy-comp-data.md.
     is_auction: bool = Field(default=False, index=True)
     accepts_best_offer: bool = Field(default=False)
+
+    # eBay's own catalog product id. Two listings sharing an epid are
+    # definitively the same product, which is what CLIP embeddings and NLP
+    # brand/model extraction both only approximate. Free, exact, and indexed
+    # because it's the best comp key available if coverage turns out good.
+    # Nothing consumes it yet: measure coverage first.
+    # See docs/decisions/0006-capture-what-ebay-already-sends.md.
+    epid: str | None = Field(default=None, index=True)
+
+    # When the listing is scheduled to end. eBay omits this for Good 'Til
+    # Cancelled listings, so its absence is itself the signal: GTC listings
+    # auto-renew under new ids and are the ones that manufacture false
+    # "sales". is_gtc records that reading so the meaning of a null isn't
+    # rediscovered every time someone reads this table.
+    item_end_date: datetime | None = None
+    is_gtc: bool = Field(default=False, index=True)
+
+    # For auctions, close to decisive: one that ends having never been bid on
+    # did not sell, whatever the disappearance looks like.
+    bid_count: int | None = None
+
+    # Seller quality. A zero-feedback seller at a great price is a different
+    # proposition from a 99.9% seller at the same price, and stage 4 should
+    # be able to say so.
+    seller_feedback_score: int | None = None
+    seller_feedback_percent: float | None = None
+
+    # Programs like AUTHENTICITY_GUARANTEE, which move price materially in
+    # some categories. JSON and unindexed: nothing queries it yet.
+    qualified_programs: list[str] | None = Field(default=None, sa_column=Column(JSON, nullable=True))
+
+    # Structured product attributes (Brand, Model, Storage Capacity, ...) from
+    # the getItem body the disappearance check already fetches and used to
+    # throw away. Left as raw JSON deliberately: aspect names vary by category
+    # and coverage is unknown, so stage 3b should decide what earns a typed
+    # column against real data rather than a guess.
+    aspects: dict | None = Field(default=None, sa_column=Column(JSON, nullable=True))
+
+    # Units eBay reports as sold. Real sales data rather than inference, for
+    # multi-quantity listings.
+    sold_quantity: int | None = None
 
     url: str
     posted_at: datetime | None = None
@@ -76,7 +126,51 @@ class Listing(SQLModel, table=True):
     # earlier than the confirming check.
     missing_since: datetime | None = None
 
+    # Two separate confidences, written when a disappearance is confirmed.
+    # They answer different questions and must not be combined:
+    #
+    #   sale_confidence  - did this listing actually result in a sale?
+    #                      (relists, auction bids, running to term)
+    #   price_confidence - is price + shipping what the buyer really paid?
+    #                      (Best Offer discounts, mid-auction bid snapshots)
+    #
+    # A relisted item probably never sold and belongs out of the comp set
+    # entirely; a Best Offer sale definitely happened but at a price we can't
+    # pin down, and belongs in with wider error bars. One number can't say
+    # that. Stage 4 should gate comp membership on the first and weight
+    # influence by the second.
+    #
+    # Both are ORDINAL, not probabilities: 0.675 does not mean 67.5% likely.
+    # sale_signals keeps the per-signal breakdown, so no opaque number hides
+    # why a comp was discounted and every weight stays separately falsifiable.
+    # See docs/decisions/0005-sale-confidence.md and 0007-two-confidences.md.
+    sale_confidence: float | None = None
+    price_confidence: float | None = None
+    sale_signals: dict | None = Field(default=None, sa_column=Column(JSON, nullable=True))
+
     __table_args__ = (UniqueConstraint("source", "source_id", name="uq_listing_source_id"),)
+
+    @property
+    def total_cost(self) -> float | None:
+        """What a buyer actually pays: item price plus shipping.
+
+        This, not `price`, is what any comparison should use. `price` is item
+        price only, and reaching for it is the correctness bug ADR 0004
+        flagged: a cheaper item with expensive delivery is the worse deal.
+
+        Returns None when shipping is unknown, deliberately rather than
+        falling back to `price`. Silently treating unknown shipping as free
+        is the same bug relocated, and it biases in the dangerous direction
+        by making items look cheaper than they are. Callers must decide what
+        to do about it; `price_confidence` already records the doubt.
+
+        Note this still excludes sales tax and Global Shipping Programme
+        import charges, both of which push real cost higher again.
+        See docs/decisions/0008-price-oracle-and-valuation-clients.md.
+        """
+        if self.shipping_cost is None:
+            return None
+        return self.price + self.shipping_cost
 
 
 class SavedSearch(SQLModel, table=True):

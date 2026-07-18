@@ -36,6 +36,8 @@ from api.db import engine as default_engine
 from api.models import Listing, ListingStatus
 from api.settings import settings
 from connectors.ebay import EbayClient
+from connectors.normalizer import enrich_from_item_body
+from connectors.sale_confidence import find_relist, score_sale
 from systems.ratelimit import QuotaExhaustedError
 
 
@@ -43,9 +45,20 @@ class SourceClient(Protocol):
     def get_item(self, item_id: str) -> dict | None: ...
 
 
+# Sources polled on a schedule. Depop will join this once it's built.
 PULL_BASED_SOURCES: dict[str, type[SourceClient]] = {
     "ebay": EbayClient,
 }
+
+# Sources whose price history is trustworthy enough to value other listings
+# against. Deliberately NOT the same set as PULL_BASED_SOURCES, and the two
+# must not be merged: Depop gets polled, but only so its listings can be
+# *scored* against eBay value, never to build history of its own. Item variety
+# there is too high for per-item comps to mean anything, and mixing them into
+# the pool would quietly contaminate the one source that does have the volume
+# and catalog structure to support this.
+# See docs/decisions/0008-price-oracle-and-valuation-clients.md.
+COMP_SOURCES: frozenset[str] = frozenset({"ebay"})
 
 
 @dataclass
@@ -57,6 +70,8 @@ class CheckResult:
 
     checked: int = 0
     marked_sold: int = 0
+    detected_relists: int = 0
+    enriched: int = 0
     pending_confirmation: int = 0
     recovered: int = 0
     skipped_proven_alive: int = 0
@@ -66,6 +81,8 @@ class CheckResult:
     def __iadd__(self, other: CheckResult) -> CheckResult:
         self.checked += other.checked
         self.marked_sold += other.marked_sold
+        self.detected_relists += other.detected_relists
+        self.enriched += other.enriched
         self.pending_confirmation += other.pending_confirmation
         self.recovered += other.recovered
         self.skipped_proven_alive += other.skipped_proven_alive
@@ -259,11 +276,33 @@ def check_listings_for_source(
                 else:
                     listing.status = ListingStatus.likely_sold
                     result.marked_sold += 1
-            elif listing.missing_since is not None:
-                # It came back, so the earlier miss was a blip. Exactly the
-                # case the two-strike rule exists to catch.
-                listing.missing_since = None
-                result.recovered += 1
+                    # Score it now, not at query time in stage 4: relist
+                    # detection depends on what the database looked like around
+                    # the disappearance, and the same query run months later
+                    # would be looking at a different world.
+                    relist = find_relist(listing, db_engine=db_engine, now=now)
+                    assessment = score_sale(listing, relist=relist, now=now)
+                    listing.sale_confidence = assessment.sale_confidence
+                    listing.price_confidence = assessment.price_confidence
+                    listing.sale_signals = assessment.signals
+                    if relist is not None:
+                        result.detected_relists += 1
+            else:
+                # The call has already been made and paid for, and its body
+                # carries things itemSummary never does: localizedAspects
+                # (structured Brand/Model/Capacity) and estimatedSoldQuantity
+                # (real units sold, not inferred). Reading only the status code
+                # was throwing all of that away for free.
+                # See docs/decisions/0006-capture-what-ebay-already-sends.md.
+                if isinstance(found, dict):
+                    enrich_from_item_body(listing, found)
+                    result.enriched += 1
+
+                if listing.missing_since is not None:
+                    # It came back, so the earlier miss was a blip. Exactly the
+                    # case the two-strike rule exists to catch.
+                    listing.missing_since = None
+                    result.recovered += 1
             # A confirmed-alive listing deliberately does NOT get last_seen_at
             # refreshed, even though stage 2 did exactly that. The two columns
             # now mean different things: last_seen_at is "last seen in search",
@@ -291,9 +330,19 @@ def check_ebay_listings(
 
 
 def check_all_sources(db_engine: Engine | None = None) -> CheckResult:
-    """Runs check_listings_for_source for every registered pull-based source."""
+    """Runs check_listings_for_source for every source that is both polled and
+    a comp source.
+
+    Deliberately intersects the two sets rather than looping over
+    PULL_BASED_SOURCES: disappearance tracking exists solely to infer sold
+    prices, so running it on a source whose prices are never used as comps
+    would spend scarce API budget producing data nothing reads.
+    See docs/decisions/0008-price-oracle-and-valuation-clients.md.
+    """
     total = CheckResult()
     for source in PULL_BASED_SOURCES:
+        if source not in COMP_SOURCES:
+            continue
         total += check_listings_for_source(source, db_engine=db_engine)
     return total
 
@@ -301,7 +350,8 @@ def check_all_sources(db_engine: Engine | None = None) -> CheckResult:
 if __name__ == "__main__":
     result = check_all_sources()
     print(
-        f"Checked {result.checked}, marked {result.marked_sold} likely_sold, "
+        f"Checked {result.checked}, marked {result.marked_sold} likely_sold "
+        f"(of which {result.detected_relists} look like relists, not sales), "
         f"{result.pending_confirmation} awaiting a second strike, "
         f"{result.recovered} recovered after a false alarm, "
         f"skipped {result.skipped_proven_alive} already proven alive, "

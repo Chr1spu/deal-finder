@@ -5,6 +5,7 @@ from sqlmodel import Session, select
 from api.models import Listing, ListingStatus
 from api.settings import settings
 from connectors.disappearance_check import (
+    COMP_SOURCES,
     EBAY_DAILY_BROWSE_LIMIT,
     check_all_sources,
     check_ebay_listings,
@@ -18,15 +19,23 @@ from connectors.ebay import RateLimit
 
 class FakeEbayClient:
     """get_item returns None for IDs in `gone`, a dummy payload otherwise.
-    Mirrors the real client's 404-means-sold contract without any network."""
+    Mirrors the real client's 404-means-sold contract without any network.
 
-    def __init__(self, gone: set[str]):
+    body lets a test supply a realistic getItem response, which carries fields
+    itemSummary never does (localizedAspects, estimatedSoldQuantity) and which
+    the checker is supposed to harvest for free.
+    """
+
+    def __init__(self, gone: set[str], body: dict | None = None):
         self._gone = gone
+        self._body = body
         self.calls: list[str] = []
 
     def get_item(self, item_id: str) -> dict | None:
         self.calls.append(item_id)
-        return None if item_id in self._gone else {"itemId": item_id}
+        if item_id in self._gone:
+            return None
+        return {"itemId": item_id, **(self._body or {})}
 
 
 def _listing(test_engine, source_id: str | None = None) -> Listing:
@@ -96,6 +105,90 @@ def test_second_consecutive_disappearance_marks_it_sold(test_engine):
         "missing_since keeps the *first* miss, which is a closer estimate of "
         "when the item actually left the market than the confirming check is"
     )
+
+
+def test_a_still_alive_listing_is_enriched_from_the_body_we_already_paid_for(test_engine):
+    """The checker was calling getItem and reading only the status code,
+    discarding a body that carries structured Brand/Model aspects and real
+    sold quantities. Harvesting it costs nothing: the call is already made.
+    See docs/decisions/0006-capture-what-ebay-already-sends.md.
+    """
+    with Session(test_engine) as session:
+        seed_listing(session, "still-here")
+
+    client = FakeEbayClient(
+        gone=set(),
+        body={
+            "localizedAspects": [
+                {"type": "STRING", "name": "Brand", "value": "EVGA"},
+                {"type": "STRING", "name": "Chipset/GPU Model", "value": "RTX 3090"},
+            ],
+            "estimatedAvailabilities": [{"estimatedSoldQuantity": 4}],
+            "epid": "epid-999",
+        },
+    )
+    result = check_ebay_listings(client=client, db_engine=test_engine)
+
+    assert result.enriched == 1
+    listing = _listing(test_engine)
+    assert listing.aspects == {"Brand": "EVGA", "Chipset/GPU Model": "RTX 3090"}
+    assert listing.sold_quantity == 4
+    assert listing.epid == "epid-999"
+
+
+def test_enrichment_does_not_happen_for_a_listing_that_is_gone(test_engine):
+    """A 404 has no body to harvest, and must not be mistaken for one."""
+    with Session(test_engine) as session:
+        seed_listing(session, "gone")
+
+    result = check_ebay_listings(client=FakeEbayClient(gone={"gone"}), db_engine=test_engine)
+
+    assert result.enriched == 0
+    assert _listing(test_engine).aspects is None
+
+
+def test_confirming_a_sale_records_confidence_and_its_reasoning(test_engine):
+    """Stage 4 weights comps by this, so it has to be written at confirmation
+    time, not recomputed later: relist detection depends on what the database
+    looked like around the disappearance."""
+    with Session(test_engine) as session:
+        seed_listing(session, "sold-with-score")
+
+    client = FakeEbayClient(gone={"sold-with-score"})
+    check_ebay_listings(client=client, db_engine=test_engine)
+    check_ebay_listings(client=client, db_engine=test_engine)
+
+    listing = _listing(test_engine)
+    assert listing.status == ListingStatus.likely_sold
+    assert listing.sale_confidence is not None
+    assert listing.price_confidence is not None
+    assert 0.0 <= listing.sale_confidence <= 1.0
+    assert 0.0 <= listing.price_confidence <= 1.0
+    assert isinstance(listing.sale_signals, dict)
+
+
+def test_a_relisted_item_is_confirmed_sold_but_with_low_confidence(test_engine):
+    """The item is still on the market under a new id, so it didn't sell. It
+    still gets marked (the original listing really is gone), but its price
+    must not carry normal weight as a comp."""
+    with Session(test_engine) as session:
+        seed_listing(session, "original")
+        seed_listing(session, "relisted", last_seen_days_ago=0, first_seen_days_ago=0)
+        for source_id in ("original", "relisted"):
+            row = session.exec(select(Listing).where(Listing.source_id == source_id)).one()
+            row.image_hash = "same-photo"
+            session.add(row)
+        session.commit()
+
+    client = FakeEbayClient(gone={"original"})
+    check_ebay_listings(client=client, db_engine=test_engine)
+    result = check_ebay_listings(client=client, db_engine=test_engine)
+
+    assert result.detected_relists == 1
+    sold = _listing(test_engine, "original")
+    assert sold.status == ListingStatus.likely_sold
+    assert sold.sale_confidence < 0.2
+    assert sold.sale_signals["relisted_as"] == "relisted"
 
 
 def test_a_listing_that_comes_back_clears_its_strike(test_engine):
@@ -301,6 +394,11 @@ def test_check_all_sources_loops_every_registered_source(test_engine, monkeypatc
         "connectors.disappearance_check.PULL_BASED_SOURCES",
         {"ebay": FakeGoneClient, "depop": FakeStillActiveClient},
     )
+    # Both are comp sources here, since this test is about the loop shape.
+    # The separate test below covers a polled source that is NOT a comp source.
+    monkeypatch.setattr(
+        "connectors.disappearance_check.COMP_SOURCES", frozenset({"ebay", "depop"})
+    )
 
     with Session(test_engine) as session:
         seed_listing(session, "ebay-1", source="ebay")
@@ -461,3 +559,51 @@ def test_quota_reserve_covers_a_full_day_of_ingest():
         f"reserve {settings.quota_reserve} is below a full day of ingest "
         f"({ingest_calls}), so the checker could starve ingestion"
     )
+
+
+# --- comp sources versus polled sources -----------------------------------
+# See docs/decisions/0008-price-oracle-and-valuation-clients.md. eBay is the
+# only source whose prices are trustworthy enough to value others against.
+# Depop gets polled so its listings can be *scored*, never to build history.
+
+
+def test_a_polled_source_that_is_not_a_comp_source_is_never_checked(test_engine, monkeypatch):
+    """The whole point of the COMP_SOURCES split. Disappearance tracking exists
+    only to infer sold prices, so running it on a source whose prices are never
+    used as comps would spend scarce API budget producing data nothing reads.
+
+    If this fails, someone has added a connector to PULL_BASED_SOURCES and
+    silently enrolled it in comp building. That is the mistake the two sets
+    exist to prevent.
+    """
+    calls: list[str] = []
+
+    class RecordingClient:
+        def get_item(self, item_id: str) -> dict | None:
+            calls.append(item_id)
+            return None
+
+    monkeypatch.setattr(
+        "connectors.disappearance_check.PULL_BASED_SOURCES",
+        {"ebay": RecordingClient, "depop": RecordingClient},
+    )
+    monkeypatch.setattr("connectors.disappearance_check.COMP_SOURCES", frozenset({"ebay"}))
+
+    with Session(test_engine) as session:
+        seed_listing(session, "ebay-1", source="ebay")
+        seed_listing(session, "depop-1", source="depop")
+
+    check_all_sources(db_engine=test_engine)
+
+    assert calls == ["ebay-1"], "the polled non-comp source must cost zero API calls"
+    with Session(test_engine) as session:
+        depop = session.exec(select(Listing).where(Listing.source_id == "depop-1")).one()
+        assert depop.status == ListingStatus.active
+        assert depop.last_checked_at is None, "and must not even be recorded as checked"
+
+
+def test_ebay_is_the_only_comp_source():
+    """A guard on the project's central architectural claim rather than on any
+    one function. If a source is added here, sold-price inference starts
+    running against it, so it should be a deliberate ADR-level decision."""
+    assert set(COMP_SOURCES) == {"ebay"}

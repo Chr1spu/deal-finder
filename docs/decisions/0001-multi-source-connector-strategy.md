@@ -1,5 +1,7 @@
 # 0001 - Multi-source connector strategy: push vs. pull ingestion
 
+> **Partly superseded by `0008-price-oracle-and-valuation-clients.md`.** The pull-vs-push access split below still stands, including Depop being polled on a schedule. What no longer holds is the implication that Depop feeds sold-price history: eBay is now the sole comp source, and Depop is polled only so its listings can be scored *against* eBay value. Left unedited so the reasoning at the time stays readable.
+
 **Context:** Stage 1 built one connector, eBay, against its official Browse API: a scheduler polls a saved search, normalizes the results, and periodically re-checks tracked listings to build sold-price history. The next two sources actually planned, Depop and Facebook Marketplace, do not fit that pattern the same way. Depop has no official API, but its own web app calls unofficial JSON endpoints that hobby projects commonly use. Facebook Marketplace has no API at all, its ToS explicitly prohibits scraping, and it is login-walled with active bot detection. Before writing any Depop or Facebook code, the project needs one settled answer for how a listing from a source with no sanctioned API actually gets into the `Listing` table, instead of each connector inventing its own answer. OfferUp is out of scope for this decision and stays deferred until it is actually prioritized.
 
 **Decision:** Split sources into two ingestion shapes based on whether server-side automated access is viable at all.

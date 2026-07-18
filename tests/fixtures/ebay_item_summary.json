@@ -21,7 +21,15 @@
   "categories": [
     {"categoryId": "139971", "categoryName": "Video Game Consoles"}
   ],
+  "epid": "240012345",
   "buyingOptions": ["FIXED_PRICE", "BEST_OFFER"],
+  "itemEndDate": "2026-09-01T14:32:00.000Z",
+  "seller": {
+    "username": "example_seller",
+    "feedbackScore": 4821,
+    "feedbackPercentage": "99.4"
+  },
+  "qualifiedPrograms": ["EBAY_PLUS"],
   "shippingOptions": [
     {"shippingCostType": "FIXED", "shippingCost": {"value": "12.50", "currency": "USD"}},
     {"shippingCostType": "FIXED", "shippingCost": {"value": "24.99", "currency": "USD"}}
