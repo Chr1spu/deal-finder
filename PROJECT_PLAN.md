@@ -8,7 +8,7 @@ Goal: a resume/portfolio project that shows range (data engineering, systems, ML
 
 ## 1. Core Feature: Deal Scanner (build this first)
 
-This is the heart of the project: scan listings across marketplaces, and for each one, figure out whether it's actually a good deal by comparing it to what similar items have recently sold for.
+This is the heart of the project: scan listings across marketplaces, and for each one, figure out whether it's actually a good deal by comparing it to what similar items have recently sold for **on eBay**. The comps come from one place. eBay is the price oracle and every other source is a client that gets valued against it, which is why the hard problem here is identifying *which* eBay product a foreign listing is, rather than gathering prices from everywhere. See `docs/decisions/0008-price-oracle-and-valuation-clients.md`.
 
 ### What it does
 
@@ -40,9 +40,10 @@ This is the heart of the project: scan listings across marketplaces, and for eac
 
 ### Practical notes
 
-- **eBay**: official Browse API for active listings. Reliable, so start here.
-- **Depop**: no official public API; unofficial endpoints are commonly used for hobby projects. Treat as best-effort, expect breakage. Polled on a schedule like eBay, but **not folded into disappearance-tracking and not a comp source**: it is polled so its listings can be automatically scored against eBay-derived value, never to build price history of its own. See `docs/decisions/0008-price-oracle-and-valuation-clients.md`.
+- **eBay**: official Browse API for active listings. **The price oracle, and the only comp source**, not merely the first one built: it is the one marketplace here with the volume and catalog structure to make per-item price history mean anything. Everything else is scored against it.
+- **Depop**: **push-based capture, no server-side connector.** The unofficial endpoints hobby projects used are gone: measured 2026-07-25, every Depop host returns 403 to server-side requests including `robots.txt`, behind Cloudflare Bot Management. Its only official API is a partner-gated Selling API for managing your own inventory, not marketplace data. Depop listings now arrive through the browser extension, like Facebook's, and are **not disappearance-tracked and not a comp source**: they exist to be scored against eBay-derived value. See `docs/decisions/0010-depop-is-push-based-now.md` and `0008-price-oracle-and-valuation-clients.md`.
 - **Facebook Marketplace**: ToS prohibits scraping and it's login-walled with strong bot detection, so there's no server-side connector for it at all. Push-based instead: a browser extension running in the user's own logged-in session captures one listing at a time on click and posts it to the API. See `docs/decisions/0001-multi-source-connector-strategy.md`. No automated disappearance-tracking is possible for Facebook listings, only manual re-capture.
+- **What this costs, honestly**: with Depop push-based, there is no automated deal *discovery* outside eBay any more, only valuation of listings the user brings. The product is "finds deals on eBay automatically, and tells you instantly whether anything you're looking at elsewhere is underpriced", which is narrower than the original framing and still the thing worth having.
 - **OfferUp**: not yet in scope. Deferred until it's actually prioritized; will get the same pull-vs-push evaluation Depop and Facebook Marketplace just got.
 - "Recently sold" data generally isn't handed to you, so plan to build it yourself via disappearance-tracking, since it needs time to accumulate. **Applies to eBay only.** eBay is the price oracle; Depop and Facebook Marketplace are valuation clients whose listings get scored *against* eBay value and contribute no comps, because item variety there is too high for per-item price history built from them to mean anything. That makes the hard problem cross-source item identification rather than multi-source comp collection, since a foreign listing carries no eBay catalog id. See `docs/decisions/0008-price-oracle-and-valuation-clients.md`.
 
@@ -73,20 +74,32 @@ Reopened as stage 2.5 on 2026-07-12: stage 2 was code-complete but had stopped w
 
 **3. Feature pipeline**
 
-- [ ] CLIP embeddings pipeline on listing images, stored in pgvector
-- [ ] NLP extraction (brand/model/size/condition)
+- [x] CLIP embeddings pipeline on listing images, stored in pgvector
+- [x] NLP extraction, variant half: lots, defects, completeness (`ml/extract.py`, ADR `0012`)
+- [x] NLP extraction, spec half: capacity / generation / form factor / model key, plus accessory exclusion (`ml/extract.py`, ADR `0013`)
 
-Open question before starting this stage, added 2026-07-18: **measure `epid` coverage first.** eBay's catalog product id was being discarded by the normalizer and is now captured (`docs/decisions/0006-capture-what-ebay-already-sends.md`). Two listings sharing an `epid` are definitively the same product, which is what both items above only approximate. If coverage is high, exact catalog matching is a better comp key than embeddings or regex, and this stage becomes much less load-bearing than the build order assumes. The `getItem` body the disappearance check already fetches also carries `localizedAspects` (structured Brand/Model/Capacity), which weakens the case for regex-extracting the same facts from titles. Neither replaces this stage for listings with no catalog match, so it still gets built, but it should be replanned against real coverage numbers rather than the original assumption.
+Stage 3a done 2026-07-25: `ml/embeddings.py`, `ml/embed_listings.py`, `ml/similar.py`, migration `0010` (pgvector, nullable `vector(512)`), a separate `deal-finder-ml` RQ queue so the torch-free ingest worker can never be handed a GPU job, and `ListingRead` pagination on `GET /listings`. See `docs/decisions/0009-clip-embeddings-pgvector.md`.
+
+The `epid` question that was posted here as a blocker is **resolved, by argument rather than by measurement.** It asked whether high `epid` coverage would make this stage redundant, since two listings sharing one are definitively the same product. ADR 0008 answers it: `epid` is an eBay *catalog* id, so a Depop or Facebook listing has none and never will. It makes eBay-internal comps sharper and does nothing for the cross-source bridge, which is the actual product. Coverage is still worth measuring for stage 4's benefit, and cannot change whether stage 3 gets built.
+
+The same logic constrains stage 3b, and sharpens it. `localizedAspects` from the `getItem` body gives structured Brand/Model/Capacity for free on eBay listings, so regex-extracting those facts from eBay titles is largely wasted work. What has no structured attributes at all is the *foreign* listing: a scrappy Depop title and a phone photo. So 3b's real job is extraction from **untrusted, unstructured** titles, matched against eBay's structured aspects, acting as the filter that turns CLIP's "looks like this" into "is this". Design it against measured `aspects` coverage once the disappearance check has run.
+
+Three measurements from stage 3a that 3b and 4 should be designed against, all recorded in `DEVLOG.md` 2026-07-25:
+
+1. **Retrieval quality is category-dependent, not a single number.** Neighbour price spreads ran from $136-$242 (Nintendo Switch, usable almost directly) to $578-$3,000 (prebuilt gaming PCs, useless). The predictor is whether the price-setting attribute is visible in the photo at all. Extraction is worth most exactly where the image is worth least, so the two are complementary.
+2. **Image-to-image similarity must not be used as a comp confidence weight.** It ran *anti*-correlated with comp quality: useless PC neighbours scored 0.87 while useful iPhone ones scored 0.77, because interchangeable-looking items score highest when their photos say least. It is a candidate-generation score only.
+3. **Text can query the image index**, since CLIP shares one space across both. A scrappy title like "nintendo switch console" retrieved 4/4 correct consoles, and unlike (2) the *absolute* score was informative: ~0.35 when the item exists in the corpus against ~0.19 when it does not. That is a second, independent matching route for a foreign listing, needing neither a photo nor a regex. Different scale from image-to-image, so the two can never share a threshold.
 
 **4. Valuation engine**
 
-- [ ] k-NN comp retrieval against pgvector
-- [ ] Deal scoring logic + confidence weighting (the confidence input now exists: `Listing.sale_confidence`, written when a disappearance is confirmed, with the per-signal breakdown in `sale_signals`. Comps must be weighted by it, not counted equally, and confirmed relists excluded. See `docs/decisions/0005-sale-confidence.md`.)
+- [x] k-NN comp retrieval (`ml/similar.py`, `ml/match.py`) against pgvector
+- [x] Deal scoring logic + confidence weighting (`ml/valuation.py`, ADR `0014`: gates comps on `sale_confidence`, weights by `price_confidence`, refuses to estimate below 3 comps). Original note: (the confidence input now exists: `Listing.sale_confidence`, written when a disappearance is confirmed, with the per-signal breakdown in `sale_signals`. Comps must be weighted by it, not counted equally, and confirmed relists excluded. See `docs/decisions/0005-sale-confidence.md`.)
 
 **5. Backend API**
 
-- [ ] FastAPI: auth, saved searches, deal feed endpoint
-- [ ] Alerting (Discord webhook to start; upgrade later if time allows)
+- [x] FastAPI: deal feed endpoint (`GET /deals`, `GET /deals/{id}`)
+- [ ] FastAPI: auth, saved-search CRUD
+- [x] Alerting (Discord webhook, `systems/deal_scan.py`, de-duplicated so a deal is announced once)
 
 **6. Frontend**
 
@@ -153,7 +166,7 @@ Each flavor needs real domain modeling (compatibility rules, style taxonomies, s
     - `0001-multi-source-connector-strategy.md`
 - `connectors/`: `ebay.py`, `depop.py`, `normalizer.py`
 - `systems/`: `queue.py`, `scheduler.py`, `ratelimit.py`
-- `ml/`: `embeddings.py`, `nlp_extract.py`, `valuation.py`
+- `ml/`: `embeddings.py`, `embed_listings.py`, `similar.py` (all built), then `nlp_extract.py`, `valuation.py`
 - `api/`: `main.py`, `auth.py`, `routes/`
 - `extension/`: browser extension for push-based capture (Facebook Marketplace first)
 - `frontend/`: React app

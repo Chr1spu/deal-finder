@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from api.models import Listing
 
@@ -81,6 +81,59 @@ def _flatten_aspects(raw: dict) -> dict | None:
     return flattened or None
 
 
+def listing_has_ended(raw: dict, now: datetime | None = None) -> bool:
+    """True when a getItem body describes a listing that has left the market.
+
+    This exists because the original assumption behind disappearance tracking
+    was simply wrong, and wrong in the direction that produces silence rather
+    than errors. The check treated "get_item returned 404" as the sole sold
+    signal. **eBay does not 404 ended listings.** Measured against production
+    on 2026-07-25: of eight listings that had dropped out of search coverage,
+    zero returned 404, four were plainly ended (OUT_OF_STOCK, or an
+    itemEndDate in the past) and all four returned HTTP 200. Nothing would
+    ever have been marked likely_sold, and nothing ever was.
+
+    Two independent signals, either of which is sufficient:
+
+    estimatedAvailabilityStatus == OUT_OF_STOCK. For the secondhand
+    single-quantity listings this project tracks, out of stock means sold.
+    (A multi-quantity seller can be temporarily out of stock while the
+    listing stays up, which is the false positive to be aware of. The
+    two-strike confirmation still applies on top of this, so a transient
+    blip costs one extra call rather than a wrong comp.)
+
+    itemEndDate in the past. Unambiguous: the listing's own scheduled end has
+    been reached. Note this field appears only in getItem bodies, never in
+    search results, which is the subject of the note in normalize_ebay_item.
+
+    Deliberately conservative: an unparseable or absent field means "not known
+    to have ended", so uncertainty leaves a listing active rather than
+    inventing a sale. False negatives cost a later re-check; false positives
+    would put a fabricated comp into the dataset permanently.
+    """
+    now = now or datetime.now(timezone.utc)
+
+    availabilities = raw.get("estimatedAvailabilities")
+    candidates = (
+        [availabilities]
+        if isinstance(availabilities, dict)
+        else [a for a in availabilities if isinstance(a, dict)]
+        if isinstance(availabilities, list)
+        else []
+    )
+    for availability in candidates:
+        if availability.get("estimatedAvailabilityStatus") == "OUT_OF_STOCK":
+            return True
+        if availability.get("estimatedAvailableQuantity") == 0:
+            return True
+
+    end_date = _parse_ebay_datetime(raw.get("itemEndDate"))
+    if end_date is not None and end_date <= now:
+        return True
+
+    return False
+
+
 def enrich_from_item_body(listing: Listing, raw: dict) -> None:
     """Fill in fields that only a full getItem body carries, in place.
 
@@ -101,11 +154,18 @@ def enrich_from_item_body(listing: Listing, raw: dict) -> None:
     if listing.epid is None and raw.get("epid"):
         listing.epid = raw["epid"]
 
-    if listing.item_end_date is None:
-        end_date = _parse_ebay_datetime(raw.get("itemEndDate"))
-        if end_date is not None:
+    # A getItem body is the only place GTC can actually be determined, since
+    # search never returns itemEndDate at all. Settle it definitively here,
+    # in both directions: an end date means not GTC, and its absence from a
+    # *full item body* on a non-auction listing is the real GTC marker that
+    # docs/decisions/0006 was reaching for.
+    end_date = _parse_ebay_datetime(raw.get("itemEndDate"))
+    if end_date is not None:
+        if listing.item_end_date is None:
             listing.item_end_date = end_date
-            listing.is_gtc = False
+        listing.is_gtc = False
+    elif not listing.is_auction:
+        listing.is_gtc = True
 
     if isinstance(raw.get("bidCount"), int):
         listing.bid_count = raw["bidCount"]
@@ -168,12 +228,16 @@ def normalize_ebay_item(raw: dict) -> Listing:
     is_auction = "AUCTION" in buying_options
     shipping_cost, shipping_estimated = _cheapest_shipping_cost(raw)
 
-    # eBay omits itemEndDate for Good 'Til Cancelled listings, so a missing
-    # end date on a fixed-price listing *is* the GTC marker. That matters
-    # because GTC listings auto-renew under new item ids, which is how false
-    # "sales" get manufactured (see docs/decisions/0005-sale-confidence.md).
-    # Auctions always have an end date, so they're never GTC.
-    is_gtc = item_end_date is None and not is_auction
+    # is_gtc is deliberately left UNKNOWN (None) here, and this reverses what
+    # docs/decisions/0006 claimed. That ADR reasoned "eBay omits itemEndDate
+    # for Good 'Til Cancelled listings, so a missing end date is the GTC
+    # marker". True of a getItem body, false of a search response: measured
+    # 2026-07-25, itemEndDate is returned by getItem and is *never* present in
+    # an itemSummary, on any listing. Deriving GTC from its absence here
+    # therefore marked every non-auction listing GTC and measured 98.9%, which
+    # was not a finding about eBay but an artefact of asking the wrong
+    # endpoint. Only enrich_from_item_body can settle this.
+    is_gtc = None
 
     return Listing(
         source="ebay",

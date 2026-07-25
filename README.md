@@ -1,24 +1,77 @@
 # Deal Finder
 
-A secondhand-marketplace deal finder. Ingests listings (eBay first), extracts image and text features, compares against a self-built history of comparable sold items, and scores how good a deal is.
+A secondhand-marketplace deal finder. Ingests listings, extracts image and text features, compares against a self-built history of comparable sold items, and scores how good a deal is.
+
+**eBay is the price oracle and the only comp source.** It is ingested, disappearance-tracked, and used to build the price history everything else is measured against. Depop and Facebook Marketplace are valuation *clients*: their listings get identified and scored against eBay-derived value, and contribute no comps of their own, because item variety there is too high for per-item history built from them to mean anything. That makes the central technical problem cross-source item identification, since a foreign listing carries no eBay catalog id. See [docs/decisions/0008](docs/decisions/0008-price-oracle-and-valuation-clients.md).
 
 Full plan: [PROJECT_PLAN.md](PROJECT_PLAN.md).
 
-**Status:** Stage 1 (ingestion + data model) in progress.
+**Status:** Stage 3a done (CLIP embeddings in pgvector), cross-source capture working end to end for Depop and Facebook Marketplace. Sold-price history is accumulating. Next is stage 3b, NLP attribute extraction.
+
+### Capturing a listing from Depop or Facebook
+
+Neither can be polled server-side: Facebook's ToS forbids it, and Depop returns 403 to every server-side request behind Cloudflare Bot Management. So a browser extension reads the page you are already looking at, when you click the button, and values it against eBay prices.
+
+1. Start the API (`uv run uvicorn api.main:app`) and the workers.
+2. Load `extension/` as an unpacked extension (`chrome://extensions` with Developer Mode on).
+3. Open a Depop or Facebook Marketplace listing and click the toolbar button.
+
+The overlay shows what comparable eBay listings are **asking**, alongside the candidates it matched. It deliberately does not compute a "% below market" figure: those are asking prices, not sold prices, and the number would imply a precision the data does not yet have.
 
 ## Setup
 
-1. Copy `.env.example` to `.env` and fill in eBay Browse API credentials (developer.ebay.com, sandbox keys are enough to start).
-2. Install [uv](https://docs.astral.sh/uv/), then `uv sync`. This creates `.venv` and installs pinned dependencies (see `pyproject.toml` / `uv.lock`).
-3. `docker compose -f infra/docker-compose.yml up -d` to start Postgres (pgvector) and Redis.
-4. `uv run alembic upgrade head` to create the `listing` table.
-5. `uv run python -m connectors.ingest_ebay` to pull one hardcoded search query into the DB.
-6. `uv run uvicorn api.main:app --reload`, then `GET http://localhost:8000/listings`.
-7. `uv run pytest` to run the test suite (no live services needed, DB tests use in-memory SQLite and eBay calls are mocked).
+1. Copy `.env.example` to `.env` and fill in eBay Browse API credentials (developer.ebay.com).
+2. **Choose where the virtualenv lives, before installing anything.** If this repo sits in a cloud-synced folder (OneDrive, Dropbox), point uv somewhere else first, because the ML dependencies take the venv to roughly 3 GB and sync tools do not read `.gitignore`:
+   ```
+   setx UV_PROJECT_ENVIRONMENT C:\venvs\deal-finder     # Windows, persists for future shells
+   export UV_PROJECT_ENVIRONMENT=~/.venvs/deal-finder   # macOS/Linux, add to your shell profile
+   ```
+   The repo itself does not move, so git is unaffected.
+3. Install [uv](https://docs.astral.sh/uv/), then `uv sync` for the API, connectors and tests. Add `uv sync --group ml` only on the machine that runs embeddings (installs PyTorch with CUDA, see `pyproject.toml`).
+4. `docker compose -f infra/docker-compose.yml up -d` to start Postgres (pgvector) and Redis.
+5. `uv run alembic upgrade head` to create the schema.
+6. `uv run python -m connectors.ingest_ebay` to run every saved search into the DB.
+7. `uv run --group ml python -m ml.embed_listings` to embed listings that have no vector yet. Safe to re-run: it is idempotent and resumes where it stopped.
+8. `uv run uvicorn api.main:app --reload`, then `GET http://localhost:8000/listings`.
+9. `uv run pytest` to run the test suite. No live services required: DB tests use in-memory SQLite, eBay calls are mocked, and the few tests needing real Postgres or torch skip themselves when unavailable.
+
+### Running the workers
+
+Two queues, two workers, and they are not interchangeable. RQ hands a worker whatever job is next, so a single shared queue would eventually hand the deliberately torch-free ingest worker a GPU job and kill it on `import torch`.
+
+```
+rq worker deal-finder     --worker-class systems.queue.WindowsWorker   # ingest + disappearance check
+rq worker deal-finder-ml  --worker-class systems.queue.WindowsWorker   # embeddings (needs --group ml)
+uv run python -m systems.scheduler                                     # enqueues all three job types
+```
+
+Run **exactly one of each**. Duplicate or stale workers have twice caused silent failures here: a leftover worker keeps executing whatever code it imported at startup, so it can quietly run a months-old version of a job against a current database. Drop `--worker-class` once these run inside Linux containers; it exists because RQ's default worker forks, which Windows cannot do.
 
 ## Architecture overview
 
-To be filled in as the pipeline layers land. See PROJECT_PLAN.md for the target shape.
+```
+  PULL (eBay only, the price oracle)
+  saved searches ──► connectors/ingest_ebay ──► normalizer ──► listing table
+                                                                    │
+         disappearance_check ◄────────────────────────────────────  │
+         reads the response BODY, not a 404: eBay serves ended       │
+         listings at 200 with OUT_OF_STOCK. Marks likely_sold,       │
+         scores sale vs. price confidence, detects relists.          │
+                                                                    ▼
+                                              ml/embed_listings ──► embedding vector(512)
+                                                                    │
+  PUSH (Depop, Facebook: 403 / ToS, so never fetched server-side)    │
+  browser extension ──► POST /capture ──► connectors/capture ────────┤
+     (user clicks on a page they already have open)                  ▼
+                                                              ml/match
+                                                   1. image_hash exact match
+                                                   2. CLIP k-NN over eBay
+                                                          │
+                                                          ▼
+                                          candidates + what eBay is ASKING
+```
+
+Everything runs on Docker Compose (Postgres + pgvector, Redis) with RQ for job scheduling. The eBay connector lives inside a measured 5,000 calls/day budget; see [docs/decisions/0003](docs/decisions/0003-ebay-call-budget.md) for why that shapes so much of the design.
 
 ## Notable engineering decisions
 

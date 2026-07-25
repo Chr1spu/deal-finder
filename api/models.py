@@ -1,8 +1,16 @@
 from datetime import datetime, timezone
 from enum import Enum
 
-from sqlalchemy import JSON, Column, String, UniqueConstraint
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import JSON, Column, DateTime, String, UniqueConstraint
 from sqlmodel import Field, SQLModel
+
+# Dimension of the CLIP checkpoint in ml/embeddings.py (ViT-B/32 -> 512).
+# Defined here because the column declaration needs it, and duplicated as a
+# literal in the migration on purpose: a migration describes the schema at its
+# revision, so importing this would let a later checkpoint swap silently
+# rewrite history. See docs/decisions/0009-clip-embeddings-pgvector.md.
+EMBEDDING_DIM = 512
 
 
 class ListingStatus(str, Enum):
@@ -78,7 +86,15 @@ class Listing(SQLModel, table=True):
     # "sales". is_gtc records that reading so the meaning of a null isn't
     # rediscovered every time someone reads this table.
     item_end_date: datetime | None = None
-    is_gtc: bool = Field(default=False, index=True)
+    # Three-state on purpose: True (a full item body showed no end date),
+    # False (it showed one), None (never fetched a body, so unknown).
+    # It was a plain bool defaulting to False, which quietly made "unknown"
+    # indistinguishable from "definitely not GTC" and, worse, combined with a
+    # bad inference at ingest to mark every non-auction listing GTC. Search
+    # responses never carry itemEndDate, so only the disappearance check's
+    # getItem body can decide this.
+    # See docs/decisions/0011-ebay-does-not-404-ended-listings.md.
+    is_gtc: bool | None = Field(default=None, index=True)
 
     # For auctions, close to decisive: one that ends having never been bid on
     # did not sell, whatever the disappearance looks like.
@@ -104,6 +120,56 @@ class Listing(SQLModel, table=True):
     # Units eBay reports as sold. Real sales data rather than inference, for
     # multi-quantity listings.
     sold_quantity: int | None = None
+
+    # What is actually being sold, extracted from the title, because nothing
+    # structured carries it: epid identifies the product model and CLIP finds
+    # things that look alike, and neither can see what is in the box. Measured,
+    # a bare "Tablet Only" and a full dock-and-cables bundle sit at the same
+    # $159.99 inside one epid.
+    #
+    # These are comp *filters*, not weights. A lot of 50 and a for-parts unit
+    # are not noisy measurements of a working single item's value, they are
+    # measurements of something else, so they leave the comp set rather than
+    # being discounted (same reasoning as 0007's confidence split).
+    # See docs/decisions/0012-variant-extraction.md.
+    #
+    # None means a single item, which is the overwhelming default.
+    lot_size: int | None = Field(default=None, index=True)
+    # "bare" | "complete" | "bundle" | None. None means UNSTATED, never
+    # "complete": 89% of titles say nothing, and reading silence as a full
+    # bundle is exactly the error that puts bare units in the wrong comp set.
+    completeness: str | None = Field(default=None, index=True)
+    has_defect: bool = Field(default=False, index=True)
+    # A part or accessory FOR the product, not the product: a replacement
+    # heatsink, a backplate, an NVLink bridge, an empty box. These match on
+    # both model string and image, so neither epid nor CLIP rejects them,
+    # while sitting at 2-20% of the real price. Grouping graphics cards by
+    # chipset gave rtx-3090 a 1428x spread and this was the entire cause.
+    # See docs/decisions/0013-spec-extraction.md.
+    is_accessory: bool = Field(default=False, index=True)
+    # One eBay listing offering several configurations displays the CHEAPEST
+    # variant's price, so its price and its title describe different items.
+    # That manufactures fake bargains and they sort to the TOP of a deal
+    # ranking: an "iPhone 14 128GB 256GB - All Colors" at $259.99 against a
+    # $650 estimate is the entry price, not a discount. 6.4% of the corpus.
+    # See docs/decisions/0015-multi-variant-listings.md.
+    price_is_from: bool = Field(default=False, index=True)
+
+    # Spec, extracted from the title because eBay's structured aspects carry
+    # it exactly where it is not needed: 99% capacity coverage on phones,
+    # 0.3% on graphics cards. Normalized to GB so 1TB and 1024GB compare.
+    capacity_gb: int | None = Field(default=None, index=True)
+    # DDR3/4/5, PCIE3/4/5. 32GB DDR4 laptop memory medians $110.99 against
+    # $396.99 for 32GB DDR5 desktop, so this separates real price tiers.
+    spec_generation: str | None = Field(default=None, index=True)
+    # laptop / desktop / server / m.2 / 2.5in.
+    form_factor: str | None = Field(default=None, index=True)
+    # A normalized chipset key ("rtx-4080-super") for the categories where the
+    # model *is* the spec. None elsewhere, which is most of the corpus.
+    model_key: str | None = Field(default=None, index=True)
+    # The matched tokens, so no classification is opaque and every rule stays
+    # separately falsifiable against real titles. Same pattern as sale_signals.
+    variant_signals: dict | None = Field(default=None, sa_column=Column(JSON, nullable=True))
 
     url: str
     posted_at: datetime | None = None
@@ -148,6 +214,29 @@ class Listing(SQLModel, table=True):
     price_confidence: float | None = None
     sale_signals: dict | None = Field(default=None, sa_column=Column(JSON, nullable=True))
 
+    # CLIP image embedding, L2-normalized at write time so cosine distance
+    # (<=>) is meaningful and 1 - distance lands in [0, 1].
+    #
+    # Nullable rather than NOT NULL with a zero-vector default: a sentinel of
+    # all zeros forms a fake cluster that sits equidistant from everything and
+    # pollutes every k-NN result. "Not embedded" has to be representable.
+    #
+    # For eBay rows this is the reference index that foreign listings get
+    # matched against, which is why eBay coverage matters more than coverage
+    # elsewhere: a missing eBay embedding removes a possible match for every
+    # future query, a missing Depop one costs a single lookup.
+    # See docs/decisions/0009-clip-embeddings-pgvector.md.
+    embedding: list[float] | None = Field(
+        default=None, sa_column=Column(Vector(EMBEDDING_DIM), nullable=True)
+    )
+
+    # Stamped on every attempt, success *or* failure. Keying the work queue on
+    # `embedding IS NULL` instead would retry the 12 imageless listings and
+    # every dead image URL on every single run, forever.
+    embedded_at: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
+
     __table_args__ = (UniqueConstraint("source", "source_id", name="uq_listing_source_id"),)
 
     @property
@@ -171,6 +260,73 @@ class Listing(SQLModel, table=True):
         if self.shipping_cost is None:
             return None
         return self.price + self.shipping_cost
+
+
+class ListingRead(SQLModel):
+    """What GET /listings actually returns.
+
+    Serializing the `Listing` table model directly was fine at 14 columns and
+    stopped being fine at 36: the route had no pagination, so every request
+    returned every column of every row. The embedding column is what forced
+    the issue (512 floats per row, and psycopg hands back a numpy array where
+    `list[float]` is annotated), but the response was already far larger than
+    anything needed it to be.
+
+    An explicit schema rather than response_model_exclude, because what a
+    client receives should be readable in one place instead of inferred from
+    a subtraction, and stage 5's frontend needs a read model regardless.
+
+    Deliberately omitted: `embedding` (large, and meaningless to a client) and
+    `sale_signals` (the per-signal confidence breakdown, useful for debugging
+    a score but noise in a listing feed).
+    """
+
+    id: int | None = None
+
+    source: str
+    source_id: str
+    title: str
+    price: float
+    currency: str
+    # The property on Listing, not a column. This is what a comparison should
+    # use rather than `price`, so it's surfaced next to it rather than left
+    # for each client to recompute (and get wrong when shipping is unknown).
+    total_cost: float | None = None
+
+    images: list[str] = []
+    image_hash: str | None = None
+    location: str | None = None
+    condition: str | None = None
+    category: str | None = None
+
+    shipping_cost: float | None = None
+    shipping_estimated: bool = False
+    is_auction: bool = False
+    accepts_best_offer: bool = False
+
+    epid: str | None = None
+    item_end_date: datetime | None = None
+    # None means "not established yet", not False. See Listing.is_gtc.
+    is_gtc: bool | None = None
+    bid_count: int | None = None
+    seller_feedback_score: int | None = None
+    seller_feedback_percent: float | None = None
+    qualified_programs: list[str] | None = None
+    aspects: dict | None = None
+    sold_quantity: int | None = None
+
+    url: str
+    posted_at: datetime | None = None
+    status: ListingStatus = ListingStatus.active
+
+    first_seen_at: datetime
+    last_seen_at: datetime
+    last_checked_at: datetime | None = None
+    missing_since: datetime | None = None
+
+    sale_confidence: float | None = None
+    price_confidence: float | None = None
+    embedded_at: datetime | None = None
 
 
 class SavedSearch(SQLModel, table=True):

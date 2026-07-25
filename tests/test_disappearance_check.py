@@ -607,3 +607,45 @@ def test_ebay_is_the_only_comp_source():
     one function. If a source is added here, sold-price inference starts
     running against it, so it should be a deliberate ADR-level decision."""
     assert set(COMP_SOURCES) == {"ebay"}
+
+
+def test_quota_reserve_leaves_room_for_a_full_day_of_checking():
+    """The reserve protects ingest from the checker, and it can silently do
+    too good a job.
+
+    Observed live on 2026-07-25: reserve was 2,000, remaining hit exactly
+    2,000, and resolve_budget returned 0. Sold-detection halted for 15 hours
+    with ~1,550 calls left to expire unused, and nothing logged a problem
+    because a budget of zero is indistinguishable from "nothing to check".
+
+    Two bounds, both of which have to hold:
+      above  a full day of ingest, or the checker really can starve it
+      below  what the planned check volume needs, or checking halts early
+    """
+    from connectors.disappearance_check import EBAY_DAILY_BROWSE_LIMIT
+
+    ingest_calls, check_calls = estimate_daily_calls(64)
+
+    assert settings.quota_reserve > ingest_calls, (
+        f"reserve ({settings.quota_reserve}) must exceed a full day of ingest "
+        f"({ingest_calls}) or the checker can starve ingestion"
+    )
+    assert settings.quota_reserve <= EBAY_DAILY_BROWSE_LIMIT - ingest_calls - check_calls, (
+        f"reserve ({settings.quota_reserve}) leaves only "
+        f"{EBAY_DAILY_BROWSE_LIMIT - settings.quota_reserve - ingest_calls} calls for checking, "
+        f"but the configured schedule wants {check_calls}. The checker will halt partway "
+        f"through the day and accumulate no comps after that, silently."
+    )
+
+
+def test_the_checker_still_has_budget_at_the_reserve_boundary():
+    """A direct regression on the halt: at remaining == reserve the old
+    configuration returned exactly 0."""
+    from connectors.ebay import RateLimit
+
+    class AtBoundary:
+        def get_rate_limit(self):
+            return RateLimit(EBAY_DAILY_BROWSE_LIMIT, settings.quota_reserve + 700, None)
+
+    assert resolve_budget(AtBoundary(), settings.disappearance_check_budget,
+                          settings.quota_reserve) > 0

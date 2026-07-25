@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Deal Finder Capture",
+  "version": "0.1.0",
+  "description": "Capture the listing you're viewing on Depop or Facebook Marketplace and value it against eBay prices.",
+  "permissions": ["activeTab", "scripting"],
+  "host_permissions": [
+    "https://www.depop.com/*",
+    "https://www.facebook.com/*",
+    "http://localhost:8000/*"
+  ],
+  "action": {
+    "default_title": "Capture this listing",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.depop.com/products/*"],
+      "js": ["sites/depop.js", "content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.facebook.com/marketplace/item/*"],
+      "js": ["sites/facebook.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

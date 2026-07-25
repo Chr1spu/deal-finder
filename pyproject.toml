@@ -16,6 +16,11 @@ dependencies = [
     "python-dotenv>=1.0,<1.1",
     "imagehash>=4.3,<4.4",
     "pillow>=11.0,<12.0",
+    # Main dependencies, not the ml group: api/models.py imports Vector to
+    # declare the embedding column, and everything imports api.models. The
+    # package is tiny and pure Python (it's the SQLAlchemy type plus the
+    # distance operators); torch is the heavy part and that stays optional.
+    "pgvector>=0.3.6,<0.4",
 ]
 
 [dependency-groups]
@@ -26,9 +31,34 @@ dev = [
     "ruff>=0.8,<0.9",
     "mypy>=1.13,<1.14",
 ]
+# Stage 3's CLIP embeddings, roughly 3 GB installed. A PEP 735 group rather
+# than an extra because `package = false` below makes extras uninstallable
+# here. Deliberately absent from default-groups: a plain `uv sync` stays
+# torch-free, so the API, the ingest worker and the whole test suite install
+# and run without it. Only the ML worker needs `uv sync --group ml`.
+# See docs/decisions/0009-clip-embeddings-pgvector.md.
+ml = [
+    "torch>=2.6,<3",
+    "torchvision>=0.21,<1",
+    "open-clip-torch>=2.30,<3",
+]
 
 [tool.uv]
 package = false
+
+# PyPI's default torch wheel for Windows is CPU-only, and that failure is
+# silent: the sync succeeds, imports work, and torch.cuda.is_available() is
+# just quietly False. `explicit = true` keeps this index from being consulted
+# for anything else, and [tool.uv.sources] below pins the two packages that
+# must come from it.
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu128" }]
+torchvision = [{ index = "pytorch-cu128" }]
 
 [tool.ruff]
 target-version = "py312"

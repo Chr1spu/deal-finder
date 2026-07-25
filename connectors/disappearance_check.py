@@ -36,7 +36,7 @@ from api.db import engine as default_engine
 from api.models import Listing, ListingStatus
 from api.settings import settings
 from connectors.ebay import EbayClient
-from connectors.normalizer import enrich_from_item_body
+from connectors.normalizer import enrich_from_item_body, listing_has_ended
 from connectors.sale_confidence import find_relist, score_sale
 from systems.ratelimit import QuotaExhaustedError
 
@@ -263,7 +263,24 @@ def check_listings_for_source(
             listing.last_checked_at = now
             result.checked += 1
 
-            if found is None:
+            # Enrich first, and unconditionally. The call is already paid for,
+            # and an *ending* listing's body is the most valuable one there is:
+            # it carries the real itemEndDate and estimatedSoldQuantity that
+            # sale scoring wants. Doing this only on the "still alive" branch
+            # threw that away for exactly the listings that mattered most.
+            if isinstance(found, dict):
+                enrich_from_item_body(listing, found)
+                result.enriched += 1
+
+            # A 404 is NOT the signal. eBay keeps serving ended listings at
+            # HTTP 200 with estimatedAvailabilityStatus OUT_OF_STOCK and/or a
+            # past itemEndDate; measured against production, zero of eight
+            # vanished listings 404'd. Reading only the status code meant
+            # nothing was ever marked sold.
+            # See docs/decisions/0011-ebay-does-not-404-ended-listings.md.
+            has_ended = found is None or listing_has_ended(found, now=now)
+
+            if has_ended:
                 if listing.missing_since is None:
                     # First strike. likely_sold is terminal (the candidate
                     # query only looks at active listings) and the row becomes
@@ -288,16 +305,6 @@ def check_listings_for_source(
                     if relist is not None:
                         result.detected_relists += 1
             else:
-                # The call has already been made and paid for, and its body
-                # carries things itemSummary never does: localizedAspects
-                # (structured Brand/Model/Capacity) and estimatedSoldQuantity
-                # (real units sold, not inferred). Reading only the status code
-                # was throwing all of that away for free.
-                # See docs/decisions/0006-capture-what-ebay-already-sends.md.
-                if isinstance(found, dict):
-                    enrich_from_item_body(listing, found)
-                    result.enriched += 1
-
                 if listing.missing_since is not None:
                     # It came back, so the earlier miss was a blip. Exactly the
                     # case the two-strike rule exists to catch.

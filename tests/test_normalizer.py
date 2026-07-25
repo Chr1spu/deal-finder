@@ -1,13 +1,26 @@
 import json
 from pathlib import Path
 
-from connectors.normalizer import enrich_from_item_body, normalize_ebay_item
+from connectors.normalizer import (
+    enrich_from_item_body,
+    listing_has_ended,
+    normalize_ebay_item,
+)
 
 FIXTURE = Path(__file__).parent / "fixtures" / "ebay_item_summary.json"
 
 
-def load_fixture() -> dict:
-    return json.loads(FIXTURE.read_text())
+def load_fixture(**overrides) -> dict:
+    """A recorded-shape eBay *search* itemSummary.
+
+    Note what it does NOT contain: itemEndDate. Real search responses never
+    return it (only getItem does), and the fixture used to include it anyway,
+    which made a broken GTC inference look correct in every test. Pass
+    overrides to add fields a specific test needs.
+    """
+    raw = json.loads(FIXTURE.read_text())
+    raw.update(overrides)
+    return raw
 
 
 def test_normalize_ebay_item_maps_core_fields():
@@ -76,34 +89,62 @@ def test_seller_quality_is_captured():
     assert listing.seller_feedback_percent == 99.4
 
 
-def test_item_end_date_is_parsed():
-    listing = normalize_ebay_item(load_fixture())
+def test_item_end_date_is_parsed_when_a_response_actually_carries_one():
+    """Search responses don't carry itemEndDate, so the parser is exercised
+    with one supplied explicitly. This test previously relied on the search
+    fixture having the field, which real ones never do; that fixture error is
+    exactly what let the GTC bug pass review."""
+    listing = normalize_ebay_item(load_fixture(itemEndDate="2026-09-01T14:32:00.000Z"))
     assert listing.item_end_date is not None
     assert listing.item_end_date.year == 2026
 
 
-def test_a_fixed_price_listing_with_no_end_date_is_gtc():
-    """eBay omits itemEndDate for Good 'Til Cancelled listings, so its absence
-    IS the signal. GTC listings auto-renew under new ids, which is how false
-    'sales' get manufactured."""
-    raw = load_fixture()
-    del raw["itemEndDate"]
-    assert normalize_ebay_item(raw).is_gtc is True
+def test_gtc_is_unknown_from_a_search_response():
+    """The correction that matters. A search itemSummary NEVER carries
+    itemEndDate (verified against production 2026-07-25), so its absence says
+    nothing at all about Good 'Til Cancelled and must not be read as evidence.
+    Inferring GTC here marked every non-auction listing GTC and produced a
+    98.9% figure that was an artefact of the wrong endpoint.
+    See docs/decisions/0011-ebay-does-not-404-ended-listings.md."""
+    listing = normalize_ebay_item(load_fixture())
+    assert listing.is_gtc is None, "unknown, not False, and definitely not True"
+    assert listing.item_end_date is None
 
 
-def test_an_auction_is_never_gtc():
-    """Auctions always have an end date, so a missing one must not be read as
-    GTC for them."""
+def test_an_auction_from_search_is_also_unknown_gtc():
+    """Auctions are never GTC in reality, but ingest still shouldn't claim to
+    know: the same absent field is doing no work either way, and a value that
+    happens to be right for the wrong reason is still an inference the data
+    doesn't support."""
     raw = load_fixture()
-    del raw["itemEndDate"]
     raw["buyingOptions"] = ["AUCTION"]
     listing = normalize_ebay_item(raw)
     assert listing.is_auction is True
+    assert listing.is_gtc is None
+
+
+def test_a_full_item_body_with_an_end_date_settles_gtc_as_false():
+    listing = normalize_ebay_item(load_fixture())
+    assert listing.is_gtc is None
+
+    enrich_from_item_body(listing, _item_body(itemEndDate="2026-09-01T14:32:00.000Z"))
+
     assert listing.is_gtc is False
+    assert listing.item_end_date is not None
 
 
-def test_a_listing_with_an_end_date_is_not_gtc():
-    assert normalize_ebay_item(load_fixture()).is_gtc is False
+def test_a_full_item_body_with_no_end_date_settles_gtc_as_true():
+    """The inference ADR 0006 was reaching for, applied where it's actually
+    valid: a *full item body* that omits itemEndDate on a non-auction listing
+    really is the GTC marker."""
+    listing = normalize_ebay_item(load_fixture())
+
+    body = _item_body()
+    body.pop("itemEndDate", None)
+    enrich_from_item_body(listing, body)
+
+    assert listing.is_gtc is True
+    assert listing.item_end_date is None
 
 
 def test_malformed_timestamps_do_not_break_ingest():
@@ -250,18 +291,6 @@ def test_enrich_never_blanks_a_field_that_already_has_a_value():
     assert listing.sold_quantity == 5
 
 
-def test_enrich_can_correct_a_gtc_guess():
-    """If a listing looked GTC because search omitted the end date, but the
-    full body has one, the guess should be corrected rather than kept."""
-    raw = load_fixture()
-    del raw["itemEndDate"]
-    listing = normalize_ebay_item(raw)
-    assert listing.is_gtc is True
-
-    enrich_from_item_body(listing, _item_body())
-
-    assert listing.is_gtc is False
-    assert listing.item_end_date is not None
 
 
 def test_enrich_ignores_empty_aspects():
@@ -345,3 +374,63 @@ def test_a_missing_shipping_cost_type_is_treated_as_firm():
 
     assert listing.shipping_cost == 7.00
     assert listing.shipping_estimated is False
+
+
+# --------------------------------------------------------- has this ended?
+
+
+def test_a_listing_out_of_stock_has_ended():
+    """The signal that was missing entirely. eBay serves ended listings at
+    HTTP 200 with OUT_OF_STOCK rather than 404ing them, so reading only the
+    status code meant nothing was ever marked sold.
+    See docs/decisions/0011-ebay-does-not-404-ended-listings.md."""
+    body = _item_body(
+        estimatedAvailabilities=[
+            {"estimatedAvailabilityStatus": "OUT_OF_STOCK", "estimatedAvailableQuantity": 0}
+        ]
+    )
+    assert listing_has_ended(body) is True
+
+
+def test_zero_available_quantity_has_ended():
+    body = _item_body(
+        estimatedAvailabilities=[
+            {"estimatedAvailabilityStatus": "IN_STOCK", "estimatedAvailableQuantity": 0}
+        ]
+    )
+    assert listing_has_ended(body) is True
+
+
+def test_a_past_end_date_has_ended():
+    body = _item_body(itemEndDate="2020-01-01T00:00:00.000Z")
+    assert listing_has_ended(body) is True
+
+
+def test_a_future_end_date_has_not_ended():
+    body = _item_body(itemEndDate="2099-01-01T00:00:00.000Z")
+    assert listing_has_ended(body) is False
+
+
+def test_an_in_stock_listing_has_not_ended():
+    assert listing_has_ended(_item_body()) is False
+
+
+def test_availabilities_as_a_bare_object_is_handled():
+    """eBay documents this as an array and returns a bare object in places.
+    Handle both rather than pick one and be silently wrong forever."""
+    body = _item_body(
+        estimatedAvailabilities={"estimatedAvailabilityStatus": "OUT_OF_STOCK"}
+    )
+    assert listing_has_ended(body) is True
+
+
+def test_unknown_shapes_do_not_invent_a_sale():
+    """Conservative on purpose. A false negative costs one re-check; a false
+    positive puts a fabricated comp in the dataset permanently."""
+    for body in (
+        _item_body(estimatedAvailabilities=None, itemEndDate=None),
+        _item_body(estimatedAvailabilities="nonsense", itemEndDate="not-a-date"),
+        _item_body(estimatedAvailabilities=[], itemEndDate=None),
+    ):
+        body.pop("itemEndDate", None) if body.get("itemEndDate") is None else None
+        assert listing_has_ended(body) is False

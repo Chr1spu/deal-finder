@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -297,3 +298,159 @@ def test_likely_sold_listing_is_not_resurrected_by_a_search_hit(test_engine):
     assert result.reactivated == 0
     with Session(test_engine) as session:
         assert session.exec(select(Listing)).one().status == ListingStatus.likely_sold
+
+
+def seed_stale_schema_listing(test_engine, **overrides) -> int:
+    """A listing as the pre-stage-2.5 ingest wrote them: stage-1 fields only,
+    everything from migration 0005 on left at its column default.
+
+    This is the real production shape, not a hypothetical. The live corpus of
+    10,496 rows was written by a resident worker running code from before
+    those columns existed, so every one of them looks like this.
+    """
+    fields = {
+        "source": "ebay",
+        "source_id": "v1|123456789012|0",
+        "title": "Nintendo Switch OLED Console - White",
+        "price": 249.99,
+        "url": "https://www.ebay.com/itm/123456789012",
+        "images": ["https://i.ebayimg.com/images/g/main.jpg"],
+        "image_hash": "hash-of-old",
+    }
+    fields.update(overrides)
+    with Session(test_engine) as session:
+        listing = Listing(**fields)
+        session.add(listing)
+        session.commit()
+        session.refresh(listing)
+        assert listing.id is not None
+        return listing.id
+
+
+def test_existing_listing_backfills_fields_added_after_it_was_inserted(test_engine):
+    """The bug this guards: the update path refreshed six fields while the
+    model grew to thirty-four, so a listing already in the table could never
+    acquire a column added later. Every ingest since has *seen* these values
+    and thrown them away."""
+    saved_search = seed_saved_search(test_engine)
+    listing_id = seed_stale_schema_listing(test_engine)
+
+    result = ingest_saved_search(
+        saved_search,
+        client=FakeEbayClient([load_fixture()]),
+        db_engine=test_engine,
+        image_hasher=fake_image_hasher,
+    )
+
+    assert (result.inserted, result.updated) == (0, 1), "same listing, not a new one"
+    with Session(test_engine) as session:
+        listing = session.get(Listing, listing_id)
+        assert listing is not None
+        assert listing.epid == "240012345"
+        assert listing.shipping_cost == 12.50
+        assert listing.accepts_best_offer is True
+        assert listing.seller_feedback_score == 4821
+        assert listing.seller_feedback_percent == 99.4
+        assert listing.qualified_programs == ["EBAY_PLUS"]
+        # Stays None, and that is correct: search responses never carry
+        # itemEndDate, so ingest has no way to learn it. Only the
+        # disappearance check's full item body can. See ADR 0011.
+        assert listing.item_end_date is None
+
+
+def test_refresh_does_not_blank_a_field_missing_from_a_later_response(test_engine):
+    """Additive, like normalizer.enrich_from_item_body: one response that
+    omits a field must not erase what an earlier one taught us."""
+    saved_search = seed_saved_search(test_engine)
+    listing_id = seed_stale_schema_listing(
+        test_engine, epid="240012345", seller_feedback_score=4821, shipping_cost=12.50
+    )
+
+    sparse = load_fixture()
+    for field in ("epid", "seller", "shippingOptions", "qualifiedPrograms"):
+        sparse.pop(field)
+
+    ingest_saved_search(
+        saved_search,
+        client=FakeEbayClient([sparse]),
+        db_engine=test_engine,
+        image_hasher=fake_image_hasher,
+    )
+
+    with Session(test_engine) as session:
+        listing = session.get(Listing, listing_id)
+        assert listing is not None
+        assert listing.epid == "240012345"
+        assert listing.seller_feedback_score == 4821
+        assert listing.shipping_cost == 12.50
+
+
+def test_missing_shipping_does_not_manufacture_a_price_observation(test_engine):
+    """Regression on the interaction between the two rules above: because a
+    missing shipping cost is declined rather than written, comparing the
+    *incoming* values against the stored ones would disagree forever and log
+    a fresh price change on every single run."""
+    saved_search = seed_saved_search(test_engine)
+    seed_stale_schema_listing(test_engine, shipping_cost=12.50)
+
+    sparse = load_fixture()
+    sparse.pop("shippingOptions")
+
+    for _ in range(3):
+        result = ingest_saved_search(
+            saved_search,
+            client=FakeEbayClient([sparse]),
+            db_engine=test_engine,
+            image_hasher=fake_image_hasher,
+        )
+        assert result.price_changes == 0
+
+    with Session(test_engine) as session:
+        assert len(session.exec(select(PriceObservation)).all()) == 0
+
+
+def test_ingest_never_claims_to_know_gtc(test_engine):
+    """Ingest sees only search responses, which never carry itemEndDate, so it
+    has no basis for a GTC judgement in either direction. Inferring one here is
+    what produced a bogus 98.9% GTC rate across the whole corpus.
+    See docs/decisions/0011-ebay-does-not-404-ended-listings.md."""
+    saved_search = seed_saved_search(test_engine)
+    listing_id = seed_stale_schema_listing(test_engine)
+
+    ingest_saved_search(
+        saved_search,
+        client=FakeEbayClient([load_fixture()]),
+        db_engine=test_engine,
+        image_hasher=fake_image_hasher,
+    )
+
+    with Session(test_engine) as session:
+        listing = session.get(Listing, listing_id)
+        assert listing is not None
+        assert listing.is_gtc is None
+        assert listing.item_end_date is None
+
+
+def test_ingest_does_not_erase_what_the_check_learned_from_a_full_body(test_engine):
+    """The disappearance check populates item_end_date and is_gtc from a real
+    item body. A later ingest, whose response simply lacks those fields, must
+    not blank them: absence in a search response is evidence of nothing."""
+    saved_search = seed_saved_search(test_engine)
+    listing_id = seed_stale_schema_listing(
+        test_engine,
+        item_end_date=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        is_gtc=False,
+    )
+
+    ingest_saved_search(
+        saved_search,
+        client=FakeEbayClient([load_fixture()]),
+        db_engine=test_engine,
+        image_hasher=fake_image_hasher,
+    )
+
+    with Session(test_engine) as session:
+        listing = session.get(Listing, listing_id)
+        assert listing is not None
+        assert listing.item_end_date is not None, "learned from a real body, not discardable"
+        assert listing.is_gtc is False

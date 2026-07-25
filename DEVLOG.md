@@ -1,5 +1,317 @@
 # Devlog
 
+## 2026-07-25 - Multi-variant listings, and making the deal feed reachable
+
+**Did:**
+- **Multi-variant detection** (ADR `0015`, migration `0014`). One eBay listing offering several configurations shows the price of the CHEAPEST one, so its price and its title describe different items. 671 listings (5.0%), and they concentrate at the top of a deal ranking because a from-price beside a full-spec title produces the largest apparent discounts in the dataset. `price_is_from` joins lots, defects and accessories in `usable_as_comp`.
+- **The deal feed is reachable.** `GET /deals` (cached, from the scheduled scan) and `GET /deals/{id}` (computed live). `systems/deal_scan.py` runs the scan on the queue, caches to Redis, and posts new deals to a Discord webhook. Scheduler gained a fourth branch. Before this the whole pipeline worked and you needed a Python REPL to see a single result.
+- 318 tests passing, mypy clean across 64 files.
+
+**Decided:**
+- Deal results cache in **Redis, not a table**. A deal score is derived and goes stale the moment a comp arrives, unlike `sale_confidence` which is frozen at disappearance time because it describes a moment. A TTL says exactly that: recomputable snapshot, not fact. No migration, and no stale table outliving the logic that wrote it.
+- The feed always ships the **comps and the caveats**, not just a percentage. `CLAUDE.md` requires a match to be surfaced as a best guess with its evidence, and a deal score with no visible comps is exactly the verdict shape that forbids.
+- Alerts track what has already been announced in a Redis set. Re-announcing the same deal every hour until it sells trains the reader to ignore the channel, and an alert nobody reads is worse than none.
+- **Category became a hard comp filter**, unlike the spec fields which only apply when stated. Measured: 16% of comps were cross-category, including a $1,500 "ASUS ROG Strix Gaming Desktop Tower PC" comping a graphics card, because CLIP matched two black boxes with RGB and the PC's title names no GPU model so every spec filter passed it through as "unstated". Spread 2.94x to 2.70x, only 9 of 120 comp sets thinned.
+
+**Broke / debugged, all of it found by reading the deal ranking:**
+- **A trademark symbol was silently disabling the most selective filter in the pipeline.** "ROG Strix GeForce RTX(tm) 4080" stored `model_key` as NULL, because the regex required the family and number to be adjacent. NULL then passed the "unstated" comp rule, putting a $1,200 RTX 4080 into the comp set for an RTX 5070 Ti asking $49.99. 18 listings affected. One character.
+- `"*MISSING CORE*"` and `"NO MEM NO HDD"` were surfacing as 89% and 64% discounts. Adding them as defects immediately broke the other direction, flagging a $4,854 HP Z8 workstation sold "NO GPU" as broken. The honest distinction turned out to be semantic: **a machine missing a component is a reduced configuration (`bare`), a component missing its own core is broken (`defect`)**. Both then leave comp sets built for complete units, by different and correct routes.
+- The capacity-count rule for multi-variant fired on 191 real machines, because "Gaming PC 16GB RAM 512GB SSD RTX 4060 8GB" is three capacities describing three components. Gating multi-component categories out fixed it exactly.
+- A heredoc wrote `` into a regex as a literal backspace for the second time this session. The file looks correct and the pattern silently never matches.
+
+**The pattern that keeps paying:** every correctness bug in this entry was found by running `find_deals` and reading the top of the list, not by a test. A mispriced or mis-parsed listing is indistinguishable from a huge discount, so the ranking sorts the pipeline's worst failures to the top for free. That is now written into `CLAUDE.md` as a step to run after any extraction or valuation change.
+
+**Still outstanding:**
+- Auth. `POST /capture` writes to the database unauthenticated, which is fine local-only and must land before anything is exposed.
+- Comps still admit listings whose `model_key` is NULL because the title omits the family ("Gigabyte 3060 Ti" with no "RTX"), so a 3060 Ti can comp a 3080 Ti. Requiring an exact model match would shrink comp sets sharply; worth measuring the trade rather than guessing.
+- The browser extension has still never run against a live page.
+
+
+## 2026-07-25 - Stage 4: valuation, and the deal ranking that audited the extractor
+
+**Did:**
+- Built `ml/valuation.py`: sold comps, a weighted-median estimate, an ordinal confidence, and a deal score. ADR `0014`. This is the first module that answers the question the project exists for.
+- Stage 4 became buildable on a measurement that corrected an earlier reading. Counting `epid`-keyed comp groups suggested only 14 products had 2+ sales, which looked far too thin. But `epid` covers just 13% of sold listings, and the actual retrieval path finds far more: sampling 100 active listings, **69% find three or more sold comps and the median is five**.
+- `0007`'s two confidence scores are finally used, exactly as that ADR specified: **gate membership on `sale_confidence`, weight influence by `price_confidence`.** A comp that probably never sold is excluded outright; one that sold at an unclear price is included and counts less.
+- Refuses to answer below three comps. 42% of sampled listings get no estimate, which is the intended behaviour: a confident-looking number gets acted on, a missing one does not.
+- Fixed the quota reserve that had silently halted sold-detection (previous entry), plus two config-invariant tests.
+- 302 tests passing, mypy clean across 60 files.
+
+**The measurement worth keeping:** the median deal score is **-10.8%**. The typical active listing sits *above* what comparable items sold for, which is exactly the selection effect you would predict, since things that already sold cleared the market and things still listed have not. It is a good sign the pipeline is measuring something real rather than noise.
+
+**The deal ranking turned out to be an extractor audit, which was not the plan.** The first real scan returned ten "deals" and **every single one was an accessory the extractor had missed**:
+
+```
++96.3%  *EMPTY BOX* RTX 5070
++94.2%  PNY RTX 5080 Original Retail Box ONLY & Packing
++94.1%  GIGABYTE RTX 4080 4090 GPU Cooling Fan
++93.7%  GIGABYTE RTX 3090 Cooler Heatsinks Fans + 2 Backplates
++93.3%  ZOTAC RTX 3080 Trinity - Shell ONLY
+```
+
+A mispriced accessory looks identical to a 95% discount, so **sorting by biggest discount surfaces your worst false negatives first**. That is a genuinely useful diagnostic and it is free: the ranking that is the product is also the test of everything feeding it.
+
+**What that exposed, and the fix that mattered most:**
+- The `is_accessory` gate required "for", "replacement" or "assembly". None of those five titles contain any of them. They simply say what they are.
+- Loosening it overcorrected immediately, flagging a **$4,999 RTX 5090 "With EKWB Waterblock"** and a **$3,000 RTX 4090 "With Retail Box"** as parts. Same lesson for the third time this session: `"X only"` and `"X for Y"` are accessories, `"Y with X"` is a product including one. An inclusion-prefix guard fixed it, after a first attempt anchored the pattern to the end of the window and silently never matched.
+- **The real answer was to stop writing vocabulary and use eBay's own taxonomy.** "Alphacool Eisblock Aurora Acryl GPX-N RTX 4090" is unrecognisable as a cooler from its title unless you happen to know Alphacool makes coolers, and eBay files it under **"Water Cooling"** without being asked. Matching on category tokens (cooling, parts, accessor, cases/covers, charger, attachment) took accessories from 305 to 489 and caught a class no regex was going to reach. `"Mixed Lots"` does the same for lots.
+- Conversely, "retail box" and "original box" came *out* of the title vocabulary: a card advertised "with Original Box" is a real $4,750 card whose seller kept the packaging.
+
+**Broke / debugged:**
+- `find_deals` initially valued all 12,433 active listings at a k-NN query each, roughly ten minutes. Narrowed to listings sharing a `model_key` or `epid` with something already sold: 4,326 candidates, ~3.6 minutes for a full scan. It is a batch job, not an interactive call, and now says so.
+- A heredoc wrote `\b` into a regex as a literal backspace (`\x08`). The file *looked* correct and the pattern silently never matched, which is what let the $4,999 card stay flagged through two attempted fixes. Worth remembering: when a regex mysteriously does not match, print its `.pattern` repr.
+
+**Known gaps, measured not guessed:**
+- **Multi-variant listings are the biggest remaining source of fake deals.** 563 listings say "All Colors", "choose", or list two capacities ("128GB 256GB"), and eBay shows the *lowest* variant price. An iPhone 14 at "$259.99" against a $650 estimate is that, not a bargain. This needs a "price is a from-price" concept and is the top item next.
+- A few cooling accessories still slip through when a seller files them under Graphics/Video Cards.
+
+## 2026-07-25 - Spec extraction, and the accessories that were pretending to be products
+
+**Did:**
+- Extended `ml/extract.py` with five more fields: `is_accessory`, `capacity_gb`, `spec_generation`, `form_factor`, `model_key`. Migration `0013`, wired through ingest, capture and comp selection. `docs/decisions/0013-spec-extraction.md`.
+- **Comp-set price spread across all categories fell from 4.28x to 2.74x, with zero comp sets thinned below 3 candidates.** By category, on the ones that were broken:
+
+| Category | Before | After |
+|---|---|---|
+| Graphics/Video Cards | 10.1x | **3.5x** |
+| Memory (RAM) | 8.0x | **1.9x** |
+| Solid State Drives | 4.2x | **1.9x** |
+
+- **Found a comp poisoner worse than lots, and it was invisible until listings were grouped by something that should have made them comparable.** Grouping graphics cards by extracted chipset gave `rtx-3090` a price spread of **1428x**. The low end was entirely parts *for* the card: a $6.61 manual, a $34.99 backplate, a $50 empty box, an $88 heatsink assembly, a $187 NVLink bridge, a $199 case. They match on model string **and** on image (a photo of a GPU cooler looks like a GPU), so neither `epid` nor CLIP rejects them, and they sit at 2-20% of the real price. 193 listings (1.5%), median $108 against a corpus median of $400.
+- Extended the defect vocabulary with "no display / no power / no boot / does not post", found on RTX 3090 listings sitting at half price inside an otherwise-clean model group.
+- Fixed the quota reserve that had silently halted sold-detection (see the previous entry), and added two config-invariant tests, since a budget of zero is indistinguishable from "nothing to check".
+- 302 tests passing (up from 250), mypy clean across 59 files.
+
+**Decided:**
+- Typed indexed columns, not a JSON `specs` blob. Every one of these is a comp filter, and filtering in SQL on JSON keys is both slower and easier to get subtly wrong. Matches the existing convention from `0006`: typed for what is queried, JSON for what is not.
+- Capacity normalized to GB so 1TB and 1024GB compare, taking the largest value mentioned since titles list several ("64GB RAM 1TB SSD").
+- Spec filters apply only when the *query* listing states a value, and unstated candidates are always kept. Requiring a match on a field that is silent 89% of the time would discard the corpus rather than sharpen it. The zero-thin-comp-sets result confirms the rule holds in practice.
+- Accessories are excluded outright rather than down-weighted, for the same reason as lots: a heatsink is not a noisy measurement of a graphics card's value.
+
+**Broke / debugged:**
+- **"No GPU" means two opposite things.** On a graphics-card listing it means the box is empty. On a computer it means a working machine sold without a card, which is very much the product. An earlier version flagged a **$4,854 HP Z8 workstation**, a $1,800 gaming PC and a $999 Ryzen barebones build as accessories. Whole-machine words in the title fixed most of it, but the HP Z8's title contains no such word at all: `"HP Z8 G4 W10 GOLD 5120 14C 2.2GHZ 256GB 16TB SATA 512GB NVME NO GPU"`. Only its category ("PC Desktops & All-In-Ones") reveals what it is, so `extract_variant` now takes category as context.
+- `"CASE for GIGABYTE AORUS RTX 3090"` was missed because "case" is not in the accessory vocabulary, and adding it bare would have false-positived on "console with carrying case". Resolved with a start-anchored rule: an accessory noun that is the *subject* of the title is an accessory; the same noun later is an inclusion.
+- `"ASUS TUF RTX 3090 3-Fan Heatsink Cooler Assembly"` slipped through because it names no product it is *for*. "Assembly" and "replacement" beside an accessory noun are the same claim in different words.
+- The `changed` counter in `extract_listings` reported 0 after a run that rewrote five new columns, because it compared only the original three fields. That is the one number telling you a rule change did anything.
+
+**Tested how this behaves on categories the corpus does not contain**, since the whole vocabulary was written against PC parts, consoles and phones. The generic rules transfer correctly with no tuning: "Lot of 12 Vintage Vinyl Records" reads as a 12-item lot, "Fender Stratocaster - cracked neck for parts" as a defect, "Canon EOS R6 Camera Body Only" and "Dyson V11 - no battery, unit only" as bare units. Sneakers, jackets, chairs, LEGO and watches come back completely unflagged, which is the correct answer.
+
+Three false positives turned up that only appear outside PC parts, and one of them mattered:
+
+- **"lots of character" and "a lot of storage space" were read as two-item lots.** `is_lot` excludes a listing from comps entirely, so idiomatic English would have silently deleted clothing and furniture listings from every comp set. The word "lot" is now required not to be followed by a non-numeric "of".
+- "Heels 2.5 inch" got a 2.5-inch **drive** form factor, and "Case Logic Laptop Backpack" got a laptop form factor from a brand name. Form factor is now gated on memory/storage context.
+- Fixing that exposed a pre-existing miss in the opposite direction: `2.5" SATA SSD` never matched at all, because a word boundary between a quote mark and a space cannot match, so only the spelled-out "2.5 inch" worked.
+
+17 regression tests now cover unfamiliar categories, since the requirement is that extraction degrades to "unstated" rather than producing confident wrong answers.
+
+**Known limits:**
+- DDR5 desktop memory keeps a 19.1x spread even fully segmented, most likely single sticks against multi-stick kits. That needs a quantity-*within*-listing concept distinct from `lot_size`, and is deferred.
+- `model_key` is GPU-shaped. Extending it is more vocabulary, not a different design, and should be driven by a measured spread problem rather than added speculatively.
+
+**Worth keeping:** the accessory class was invisible in aggregate, invisible to `epid`, invisible to CLIP, and became obvious the moment listings were grouped by a key that *should* have produced agreement and did not. Grouping by something that ought to make items comparable, then reading the disagreements, is a cheap and repeatable way to find this kind of problem.
+
+## 2026-07-25 - Variant extraction, and pricing on catalog id instead of neighbours
+
+**Did:**
+- Built `ml/extract.py`: pull `lot_size`, `completeness` and `has_defect` out of listing titles, because nothing structured carries them. eBay's `localizedAspects` gives Brand, Model, Color, MPN and Storage Capacity and says nothing about what is in the box. Migration `0012`, plus `ml/extract_listings.py` to backfill. `docs/decisions/0012-variant-extraction.md`.
+- These are comp **filters, not weights**. A lot of fifty and a for-parts unit are not noisy measurements of a working single item's value, they measure something else, so they leave the comp set rather than being discounted. Same reasoning `0007` used to split sale confidence from price confidence.
+- **Then measured that filtering alone was not enough**, and found something better. Comp sets keyed on `epid` have a median price spread of **1.42x** against **4.83x** for raw CLIP neighbours, 3.4x tighter. So `ml/match.py` became a two-hop: identify the product with image hash or CLIP, then price it on the matched listing's catalog id. 24% of matches now price this way.
+- Wired extraction into eBay ingest (insert and refresh) and into capture, so classification happens once at write time rather than per query.
+- 248 tests passing (up from 210), mypy clean across 58 files.
+
+**Measured, and the numbers drove every decision here:**
+
+| Hazard | Evidence | Corpus share |
+|---|---|---|
+| Multi-item lots | "Lot of 50 SK Hynix 64GB" at **$113,000** in the same category as single sticks. Excluding 2% of the RAM category drops its mean 28% and its max from $113,000 to $21,936 | 0.7% |
+| Defects | graphics cards flagged for-parts/cracked median **$151.08** vs **$420.00** clean | 4.3% |
+| Bundling | consoles: bare **$129.99**, unstated **$174.99**, with-extras **$190.00** | 5.7% stated |
+
+**Decided:**
+- Rule-based extraction, not a model. The vocabulary is small and stable, the signals are sparse, there are no labels, and a regex that fires on "for parts" is auditable in a way a decision boundary is not.
+- Never divide a lot's price by its size to recover a unit price. Bulk pricing is not linear, and the units are often not identical ("LOT OF 54 SAMSUNG HYNIX MICRON" is three manufacturers). A derived number with unknown error is worse than an excluded row.
+- `completeness=None` means **unstated** (89% of titles), never "complete". Reading silence as a full bundle is exactly the error that puts bare units in the wrong comp set.
+- Completeness filters comps only when the *query* listing states its own, since requiring a match on a field that is usually silent would discard most of the corpus.
+- When pricing from `epid`, the displayed candidates become the epid peers rather than the neighbours that found them. Otherwise the payload shows three rows beside a median computed from twelve, and a reader cannot reconcile the two.
+
+**Broke / debugged:**
+- **The lot regex was catastrophically wrong for this corpus and only running it over all 12,678 titles revealed it.** Accepting "Nx"/"xN" quantity forms classified **1,789 listings (14.1%) as lots**, essentially all false: `"RX 6700 XT"` → "6700 x", `"Gen 4.0 x 4"` → PCIe lanes, `"Ryzen 5 7600X"` → a CPU model, `"VENTUS 3X PLUS"` → a product line, `"PCIe 4.0 x16"` → lane count. In PC hardware an x beside a number is almost never a count. Dropped those forms entirely; lots fell to 0.7% and every remaining match is genuine. A real "2x RTX 3090" is lost, which is the right trade: a false lot silently deletes a valid comp.
+- `"Gaming PC works with 4K monitors"` classified as a bundle, because the accessory lookahead accepted any digit after "with". Replaced with a strict accessory vocabulary.
+- My first attempt to measure the filter's benefit showed **zero improvement across 30 samples**, which was the measurement being wrong rather than the filter. With lots at 0.7%, a random 10-neighbour set rarely contains one. Re-measured properly: 36% of comp sets change, and when they do the median comp value moves 7.7%, up to 197%.
+- A test caught a real design flaw rather than a test bug: `candidates` held the k-NN neighbours while `price_context` was computed from the epid peers, so the API returned one set of listings beside a median from another.
+
+**Known limits, recorded rather than papered over:**
+- Extraction is high-precision and low-recall by design. 89% of listings stay unstated, so this improves the comp sets it touches and leaves the majority alone.
+- Residual spread inside filtered comp sets is still **4.3x** median, and much worse in commodity categories: **RAM 15.0x**, GPUs 8.0x. Every DDR4 stick looks identical to CLIP whether it is 16GB or 64GB, so visual similarity is close to worthless there and the discriminating attribute (capacity, speed, generation) sits in the title and in `aspects`. That is the next extraction target.
+- "READ" in a title (305 listings) is a strong seller-side signal that something is wrong but says nothing about what, so it is captured and deliberately not acted on. Negations like "no charger" (425 listings) are captured but do not yet downgrade completeness, because negation scope in title-case fragments is a harder problem than the rest of this.
+
+**Fixed a stale quota reserve that had silently halted sold-detection.**
+- `quota_reserve` was 2,000, sized when ingest ran hourly and needed 1,536 calls/day. Ingest is 2-hourly now and needs 768, so the reserve was 2.6x a full day of it. `resolve_budget` returns `min(budget, remaining - reserve)`, so once remaining hit exactly 2,000 the checker's budget became **0**.
+- Observed live: remaining sat at 2,000 with 15.2 hours until reset, the disappearance check doing nothing, and ~1,550 calls due to expire unused. Nothing logged a problem, because a budget of zero is indistinguishable from "nothing to check".
+- The reserve also capped total check capacity at 5,000 - 2,000 - 768 = **2,232/day**, below the 2,800 the settings comment's own arithmetic assumes. The configuration contradicted its own documentation.
+- Lowered to 1,000: covers a full day of ingest with 30% headroom, leaves 3,232/day for checking. Two tests now enforce both bounds (above a day of ingest, below what the planned check volume needs), since the failure mode is silent.
+- Restarting the worker and scheduler was required for this to take effect: `settings` is a module-level singleton read at import, so running processes held the old value. Same class of trap as the stale-code worker found yesterday.
+
+**Measured what stage 3b actually needs next**, rather than assuming "extract brand and model". Brand and model are largely handled already by `epid` and `localizedAspects`. What is missing is **spec**, and the evidence points at exactly which attributes:
+
+- Capacity lives in the title, not in aspects, precisely where it matters most: RAM has it in 97% of titles and 12% of aspects, graphics cards 79% of titles and **0.3%** of aspects. Phones, which do not need it, have 99% aspect coverage.
+- Capacity alone separates RAM medians cleanly ($59.50 / $75 / $181 / $800 / $1,975 for 8/16/32/64/128GB) but leaves 30-80x spread *within* each capacity.
+- Adding generation and form factor collapses it. 32GB RAM went from **82.7x** overall to 2.8x (DDR4 laptop), 4.4x (DDR4 desktop), 2.7x (DDR4 server), 3.8x (DDR5 laptop), 3.7x (DDR5 server). Only DDR5 desktop stays high at 19.1x, likely kits versus single sticks.
+
+So the remaining 3b work is a three-attribute extraction (capacity, generation, form factor), all regex-able from titles, and it is worth roughly a 20x tightening in the worst category.
+
+**Next:**
+- Spec extraction: capacity, generation, form factor. Evidence above.
+- Keep accumulating sold history. Stage 4 still wants more comps per product: 85 distinct products, only 14 with 2+ sold.
+
+## 2026-07-25 - The sold-detection signal was wrong, and Depop went push-based
+
+**Did:**
+- **Fixed the bug that made the entire project's core mechanism unable to work.** Sold-price history is built by re-checking listings and detecting when they leave the market. The detection was `get_item()` returning `None`, i.e. HTTP 404. **eBay does not 404 ended listings.** Probed eight listings that had dropped out of search coverage: zero returned 404, four were plainly gone (`OUT_OF_STOCK` and/or a past `itemEndDate`) and returned HTTP 200 with a full body. The sold branch was unreachable and had been since stage 2, which is why the database held 12,420 listings and zero `likely_sold` rows.
+- Replaced it with `normalizer.listing_has_ended`, which reads the body: `estimatedAvailabilityStatus == OUT_OF_STOCK`, `estimatedAvailableQuantity == 0`, or an `itemEndDate` at or before now. A 404 stays as a third signal. Deliberately conservative, so an unrecognised shape leaves a listing active. `docs/decisions/0011-ebay-does-not-404-ended-listings.md`.
+- **Result: 241 listings marked `likely_sold`, 43 of them caught as relists rather than sales.** Sale confidence spans 0.045 to 0.900, the low end being the relists. First comp data the project has ever produced.
+- Moved item-body enrichment ahead of the branch so it runs unconditionally. An *ending* listing's body carries the real `itemEndDate` and `estimatedSoldQuantity`, and it was being discarded for exactly the listings that mattered most.
+- **Fixed a second endpoint-confusion bug in the same area.** `is_gtc` was derived at ingest from an absent `itemEndDate`. That inference is valid for a `getItem` body and invalid for a search response, which never carries the field at all: every non-auction listing was marked GTC, producing a measured 98.9% that described the endpoint rather than the market. `is_gtc` is now `bool | None`, set only from a real item body, and migration `0011` nulls the old values because a wrong value is worse than a missing one.
+- **Depop moved from pull-based to push-based.** ADR 0001 put it on the pull side on the premise that its unofficial JSON endpoints were unofficial-but-unenforced. Measured: every Depop host now returns **403 to server-side requests, including `robots.txt`**, behind Cloudflare Bot Management (`Server: cloudflare`, `__cf_bm`), while a control request to `example.com` returned 200. Depop's only official API is a partner-gated Selling API for managing your own inventory, not marketplace data. `docs/decisions/0010-depop-is-push-based-now.md`.
+- Built the push path instead: `connectors/capture.py` (validation, normalization, upsert), `POST /capture` and `GET /capture/{id}/match`, and a Manifest V3 browser extension in `extension/` with per-site parsers for Depop and Facebook Marketplace. One capture path serves both, since it is the same problem twice.
+- Built `ml/match.py`, the cross-source bridge: `image_hash` exact match first (a reused stock photo is the same product, provably, for one indexed lookup), then CLIP k-NN against the eBay index. Returns candidates with a `PriceContext`.
+- Ran a full ingest to backfill the post-`0005` fields on the stale-code corpus: 64 searches in 326s, 1,924 new, 9,346 updated, 0 failed. The update-path fix from earlier today worked.
+- Started the pipeline: one `deal-finder` worker, one `deal-finder-ml` worker, one scheduler, plus the API. Verifying this turned out to need care: process listings are misleading because `uv run` wrappers show several processes per logical worker, and raw heartbeat age is misleading in the other direction because an idle RQ worker only refreshes its heartbeat each dequeue cycle, so 3-minute gaps are normal. A naive 120s staleness check reported two healthy workers as dead. The authoritative signal is the TTL on the worker's Redis key, which RQ expires at `worker_ttl`; both showed positive TTLs, one `busy` and one `idle` with completed jobs.
+- 208 tests passing (up from 175), mypy clean across 54 files.
+
+**Measured, finally:**
+
+| Metric | Value | Why it matters |
+|---|---|---|
+| `epid` coverage | 46.0% | The number CLAUDE.md gated stage 3 on. Moderate, not high |
+| Shipping known | 73.2% | A quarter of listings still have no delivered cost |
+| Auctions | 1.1% | The auction-specific scoring is near dead code here |
+| Best Offer | 42.6% | Price confidence discounting matters a lot |
+| GTC | remeasuring | Old 98.9% was an artefact; real figure accruing per check |
+
+**`epid` coverage by category is the striking part**, because it is the exact inverse of nothing and the exact match of something:
+
+```
+Cell Phones & Smartphones   90.2%      PC Desktops & All-In-Ones    3.9%
+Memory (RAM)                60.2%      PC Laptops & Netbooks       10.6%
+Solid State Drives          53.1%      Video Game Consoles         37.3%
+CPUs/Processors             51.9%      Graphics/Video Cards        38.1%
+```
+
+Prebuilt PCs are 3.9% `epid` **and** were the category where CLIP retrieval failed worst ($578 to $3,000 spread). **The two identity mechanisms fail on the same items**, so they do not cover for each other. A custom-built PC is a one-off configuration: no catalog entry, and an anonymous black-box photo. It is intrinsically unidentifiable by catalog id or by image, which leaves text as the only route. That is a much stronger argument for stage 3b than "extraction is also useful", and it says where to point it.
+
+**Decided:**
+- End-detection reads the response body, never the status code. A 404 is one signal among three, not the signal.
+- `listing_has_ended` is conservative by design: an unknown shape means "not ended". A false negative costs one re-check; a false positive writes a fabricated comp into the dataset permanently.
+- Two-strike confirmation is kept and matters more than before, since `OUT_OF_STOCK` can be transient for a multi-quantity seller in a way a 404 never was.
+- No Depop scraping, and no commercial Depop scraper API either. Getting past Cloudflare Bot Management means fingerprint-level evasion, and this project already refuses to scrape eBay's sold pages on the strength of a `robots.txt` rule alone. Depop is now the stronger case against, not the weaker one, and a paid scraper API relocates the evasion without changing it.
+- `ml/match.py` stops at identification and deliberately does not compute a deal score. Candidate prices are *asking* prices; a "% below market" figure would imply precision the data does not have. That is stage 4's job once sold history accumulates.
+- The API response carries the caveat in words, not just numbers, and a wide candidate spread (>3x) adds an explicit warning, because the measured signature of a bad match is exactly a wide spread.
+- CORS is a fixed origin list, not `*`. The capture endpoint is unauthenticated while the stack is local-only, and a wildcard would let any page the user visits write to their database.
+
+**Broke / debugged:**
+- Ten tests failed after the `is_gtc` fix, all of them asserting the old wrong behaviour. Worse, **the fixture was complicit**: `tests/fixtures/ebay_item_summary.json` was hand-built and included an `itemEndDate` that real search responses never carry, so every test agreed with the broken inference. Removed the field from the fixture and rewrote the tests against measured reality.
+- `_refresh_from_summary` was recomputing `is_gtc` from search data, reintroducing the same bad inference on every ingest. It now leaves `item_end_date` and `is_gtc` alone entirely.
+
+**Uncomfortable, and worth recording:** a mechanism was elaborated across four ADRs, 180 tests and several weeks while its foundational assumption went unchecked against a single real response. The probe that found it cost one API call. Verifying the *signal* before building machinery on top of it is cheap, and nothing in the previous design forced it.
+
+**Next:**
+- Let it run. Sold-price history is the long pole and only accrues with wall-clock time.
+- Cross-source verification with a real phone photo is still outstanding.
+- Stage 3b, now well-aimed: text extraction is the only identity route for the categories where both `epid` and CLIP fail.
+
+## 2026-07-25 - Stage 3a: CLIP embeddings into pgvector
+
+**Did:**
+- Built the embedding pipeline: `ml/embeddings.py` (pure, image in and vector out), `ml/embed_listings.py` (owns the DB), `ml/similar.py` (the k-NN read side). CLIP ViT-B/32 from LAION via `open_clip_torch`, 512 dimensions, stored in a nullable `vector(512)` column. Migration `0010`, hand-written, since autogenerate never emits `CREATE EXTENSION` and does not know the `vector` type. `docs/decisions/0009-clip-embeddings-pgvector.md` records the reasoning.
+- The purpose is narrower than "a similarity feature": under ADR 0008 the eBay corpus is a **reference index**, and listings found on other sources are **queries against it**. `epid` is exact and free but is an eBay catalog id, so a foreign listing never carries one. Embeddings are the only available bridge, which is what justifies this stage at all.
+- Backfill and go-forward are one code path. `embed_pending()` selects `WHERE embedded_at IS NULL`, which is simultaneously the existing corpus and every row ingest lands from now on, so there is no separate one-off script to drift out of sync.
+- `embedded_at` is stamped on **every attempt**, success or failure. Keying the queue on `embedding IS NULL` instead would hand back the imageless listings and every dead image URL on every run, forever.
+- Added a second RQ queue, `deal-finder-ml`. The reason is capability, not throughput: RQ hands a worker whatever job is next, so on a shared queue the deliberately torch-free ingest worker would eventually be handed an embed job and die on `import torch`. Scheduler gained a third branch on `embed_interval_seconds`.
+- torch and `open_clip` are imported **inside functions**, never at module scope, so `systems/queue.py` can reference the job by name without dragging 3 GB of CUDA libraries into the scheduler, the API process and every test run. A test asserts the whole `ml` package imports with torch absent from `sys.modules`.
+- Images are fetched at eBay's `s-l500` CDN variant rather than the stored `s-l225`, by URL substitution. Costs no quota, since the CDN is not the Browse API. Non-eBay URLs pass through the substitution untouched.
+- **Fixed the ingest update path**, which was refreshing six fields while the model had grown to thirty-six. Anything added after stage 2 was captured on insert and never again, so a listing already in the table could never acquire a column added later. Extracted `_refresh_from_summary` so the field list lives in one place instead of being duplicated across the insert and update branches.
+- Rewrote `GET /listings`, which had no pagination and already serialized every column of all 10,496 rows. Added `ListingRead` (excludes `embedding` and `sale_signals`, exposes `total_cost` alongside `price`), plus `limit`/`offset` and `source`/`status` filters.
+- Moved the venv out of the OneDrive-synced folder to `C:\venvs\deal-finder` via `UV_PROJECT_ENVIRONMENT`, before installing torch. OneDrive does not read `.gitignore`, and the venv was about to go from 294 MB to ~3 GB. Repo dropped from ~389 MB to 95 MB on disk. The repo itself did not move, so git is unaffected.
+- 175 tests passing (up from 136), mypy clean across 48 files.
+
+**Decided:**
+- The embedding column is **nullable**, not NOT NULL with a zero-vector default. An all-zeros sentinel sits equidistant from every other vector, forming a fake cluster that turns up in every k-NN result. "Not embedded yet" has to be representable.
+- **No ANN index yet.** Measured over the full 10,484-vector corpus: **29 ms in Postgres, ~68 ms end to end** through `find_similar_to_listing` (the gap is hydrating ten `Listing` objects, not the search), at 100% recall. The ADR originally asserted "single-digit milliseconds" from estimate rather than measurement, which was wrong by roughly an order of magnitude; corrected in place once there was real data. The conclusion survives, and it is now a number rather than a guess. Stage 4's queries are also *filtered* k-NN (source, sale confidence, category), which HNSW handles badly since it walks the graph first and filters after. Revisit near 100k rows or a query measured above ~100 ms.
+- L2-normalize at write time, cosine at read. Cosine is self-defending if a row lands unnormalized; inner product would silently rank by magnitude. And `1 - (a <=> b)` lands in `[0,1]`, which the stage 4 match-confidence score needs.
+- `CLIP_MODEL` and `EMBEDDING_DIM` are code constants, not settings. They must agree with the column the migration created, and a `.env` key that can silently disagree with the schema is a footgun.
+- The migration hardcodes `512` rather than importing `EMBEDDING_DIM`. A migration describes the schema at its revision; importing a live constant would let a later checkpoint swap silently rewrite history.
+- Embedding is **not** inline in ingestion, which is the opposite call from `image_hash` in ADR 0002. Hashing is cheap CPU work with no heavy dependency; embedding is neither. Inline would let a CUDA fault take down data ingestion, put torch in the ingest worker, and force batch size 1.
+- `find_similar_*` restricts to eBay by default. Only eBay is a comp source, so matching a foreign photo against other foreign listings would price against a source with no usable history.
+- Matches carry a similarity score rather than being reduced to a boolean, because stage 4 has to surface a cross-source match as a best guess with its evidence, and it cannot do that if this layer discards the distances.
+
+**Broke / debugged:**
+- **A leaked Session in `ml/similar.py` hung the test suite past 120 seconds.** `Session(db_engine).exec(...)` without a context manager never closes, so every query left an idle transaction open in Postgres. Five exhausted the default connection pool and the sixth blocked forever, with a concurrent `DELETE` waiting behind them. Context-managed; the same tests now run in 0.24s. This would have hung the scheduler in production, not just tests.
+- The SQLite test fixture created its schema on one connection and the FastAPI `TestClient` queried another, since an in-memory SQLite database belongs to its connection and the default pool hands out one per thread. Every route test failed with "no such table: listing". Fixed with `StaticPool`.
+- Making `embed_image_urls` take an injectable `embedder` (matching the project's `client=` / `image_hasher=` convention) broke two tests that had been monkeypatching the module attribute, because the default argument was bound at definition time. They were downloading and running the real 600 MB checkpoint without anyone noticing. Rewritten to inject.
+- A `# type: ignore` on the pgvector distance call was flagged unused inside a test, since mypy does not check untyped function bodies by default. Kept only the one in `ml/similar.py`, which is genuinely needed: pgvector attaches `cosine_distance` via a comparator factory that is invisible through SQLModel's `Mapped[...]` wrapper.
+
+**Verified, with the actual output:**
+
+Full backfill across the live corpus: **10,496 attempted, 10,484 embedded, 12 failed.** All twelve failures are listings with zero images, and **not one was a dead image URL**, so the `fetch_image` failure path and the `embedded_at`-on-failure stamping were both exercised by exactly the cases they exist for. That matches the 10,484 predicted before the run. Roughly 850 MB of images at the `s-l500` variant, no eBay quota spent, since the CDN is not the Browse API.
+
+
+Querying the index with a prebuilt gaming PC listing (Core i9-12900K, RTX 3090, $1999.99) returns its ten nearest neighbours:
+
+```
+0.877  $1099.99  PowerSpec Custom PC Core i9-12900K 64GB RAM 1TB SSD XFX Radeon RX 6700
+0.869  $1149.99  PowerSpec Custom PC Ryzen 5 5600X3D 32GB RAM 1TB SSD GeForce R...
+0.858  $1400.00  Custom/Whitebox Ryzen 9 7900X RTX 3070 32GB 2TB HDD+SSD RGB WiFi Win11
+0.843  $1999.99  Gaming PC Ryzen 7 7800X3D 32GB RAM 1TB SSD RTX 4070 Ti 12GB Windows 11
+0.840  $1550.00  Gaming Pc i7 13700K Radeon RX 7900XT 20GB
+0.839  $ 999.99  High end Gaming PC - Ryzen 5 7600X, Trident32GB DDR5-6400, 1TB NVMe
+0.838  $1800.00  Custom Gaming PC - AMD 7900xt GPU & AMD RYZEN 5800x3d CPU
+0.836  $1200.00  Gaming PC, 3060, Ryzen 5 7600x3d CPU, DDR5 32GB, ASUS TUF Gaming Mobo
+0.834  $1299.99  Asus PC Core i7-14700K 32GB RAM 1TB SSD ASUS GeForce RTX 4070
+0.834  $ 875.00  CyberPowerPC Gaming PC AMD Ryzen 5 5600X 16GB 512GB SSD + 1TB HDD RTX...
+```
+
+Every neighbour is genuinely a prebuilt gaming PC, so category retrieval works. But not one has the same GPU as the query, and the spread is $875 to $1999.99 for something asking $1999.99. Averaging that set would produce a confident, meaningless number. The cause is not a weak checkpoint and a bigger one would not help: **the GPU is not visible in the photo.** These are all black towers with RGB lighting, and CLIP is correctly reporting that they look alike. The component setting nearly all of the price appears only in the title.
+
+**Retrieval quality turns out to be strongly category-dependent, which a single spot-check would have hidden.** Probing three categories:
+
+| Category | Neighbour spread | Similarity | Usable as comps? |
+|---|---|---|---|
+| Prebuilt gaming PC | $578 to $3,000 | 0.84 to 0.87 | No |
+| iPhone | $299 to $785 | 0.75 to 0.77 | With model extraction |
+| Nintendo Switch | $136 to $242 | 0.85 to 0.88 | Nearly directly |
+
+The Switch query returned nothing but Switch consoles, tightly priced. The iPhone query returned nothing but iPhones and surfaced the correct model (iPhone Air) in its top three. The predictor is whether the price-determining attribute is *visible*: a console is the product, iPhone generations differ subtly but consistently, and a PC case reveals nothing about what is inside it.
+
+**The warning for stage 4, which is the opposite of the intuitive reading:** the useless PC neighbours scored **higher** similarity (0.87) than the useful iPhone ones (0.77). Cosine similarity measures how alike the images are, and identical-looking boxes score well precisely when they are least informative. **Similarity is therefore not a proxy for comp validity and must never be used as the confidence weight on a comp.** It is a candidate-generation score. Something else, an extracted model string, has to decide whether a candidate is actually the same product.
+
+That is the concrete argument for stage 3b, and it also says where to aim it: extraction matters most in exactly the categories where the photo carries least, so the two components are complementary rather than redundant.
+
+**A second probe, not in the plan, that changes what stage 3b could be.** CLIP places text and images in the *same* vector space, so the index built here can be queried with a **title** rather than a photo. Tried with deliberately scrappy strings, the way a Depop listing actually reads:
+
+```
+"nintendo switch console"            0.346  ->  4/4 Nintendo Switch consoles
+"gaming pc with rtx graphics card"   0.354  ->  4/4 gaming PCs with RTX cards
+"airpods pro"                        0.277  ->  iPhones (corpus holds 1 AirPods listing)
+"vintage leather jacket"             0.193  ->  iPhones (corpus holds 0 jackets)
+```
+
+The last two are not retrieval failures. The saved searches only cover Switches, iPhones and PC components, so there is genuinely nothing to return, and **the score says so**: 0.34-0.35 when the item exists, 0.19-0.28 when it does not.
+
+That contrast matters more than the retrieval itself. Image-to-image similarity was shown above to be *anti*-correlated with comp quality, so it cannot be thresholded. Text-to-image similarity appears to behave the opposite way, carrying real signal about whether the corpus contains the queried item at all. Note the two run on different scales (0.19-0.35 for text-to-image against 0.75-0.88 for image-to-image), so they must never be compared to each other or share a threshold.
+
+The practical consequence for stage 3b: a foreign listing's title can query the eBay index directly, with no photo and no regex, giving a second independent matching route to cross-check against the image one. Worth designing against, though it needs validating on a corpus broad enough that "nothing relevant exists" is not the common case. Not implemented here, since stage 3a was scoped to image embeddings; `embed_text` would be about ten lines on top of what already exists.
+
+**Found (not fixed here):**
+- **The live corpus was written by stale code.** All 10,496 rows have every stage-1 field populated and everything from migration `0005` onward empty: `epid` 0/10,496, `shipping_cost` 0, and `is_gtc` False on every row where current code would set it True. RQ's failed-job registry shows a pre-stage-2.5 worker was resident and running: hourly ingest when the configured interval is 2h, no per-search isolation, unbudgeted `getItem` calls. It burned the full 5,000-call day and stopped around 2026-07-25T23:34Z. The update-path fix above is what lets these rows recover; they backfill on the next ingest after the quota resets.
+- `.env.example` had drifted from `settings.py` (`INGEST_INTERVAL_SECONDS=3600` against a 7200 default, `PROVEN_ALIVE_SECONDS=7200` against 10800). Corrected, and the 1.5x margin rule is now stated in the file rather than only in a test.
+- `ruff check` reports 80 violations, 70 of which predate this work. They are almost entirely `UP007`/`UP017` style rules that a newer ruff applies to code written in the older idiom, plus two `B008` that FastAPI's `Depends`/`Query` defaults require. New code follows the existing house style rather than diverging from it. Worth one deliberate sweep at some point, as its own change.
+
+**Next:**
+- Quota resets 2026-07-25T07:00Z. Then: one ingest to backfill the post-`0005` fields, and the deferred measurements (`epid` coverage, GTC share, auction share, and whether the live `shippingOptions`/`buyingOptions`/`localizedAspects` shapes match the fixture, which has never been checked against a real response).
+- Before restarting anything, confirm no stale worker or scheduler survives and start exactly one of each from the current tree.
+- Cross-source verification is the one that matters: embed a real phone photo and query the eBay index. eBay-to-eBay similarity proves much less, since it dodges the domain shift between clean CDN product shots and a real-world photo.
+
 ## 2026-07-18 - eBay is the price oracle, everything else is a client
 
 **Did:**

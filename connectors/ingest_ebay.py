@@ -20,11 +20,92 @@ from api.models import Listing, ListingStatus, PriceObservation, SavedSearch
 from connectors.ebay import EbayClient
 from connectors.image_hash import fetch_and_hash
 from connectors.normalizer import normalize_ebay_item
+from ml.extract import extract_variant
 from systems.ratelimit import QuotaExhaustedError
 
 logger = logging.getLogger(__name__)
 
 ImageHasher = Callable[[str], "str | None"]
+
+
+def _refresh_from_summary(existing: Listing, fresh: Listing) -> None:
+    """Copy every field an itemSummary carries from a freshly normalized
+    listing onto the stored one, in place.
+
+    This exists because the update path used to refresh six fields while the
+    model grew to thirty-six. Anything added after stage 2 was therefore
+    captured on insert and never again, so a listing already in the table
+    could never acquire it: a whole corpus ingested before a column existed
+    stays permanently blank even though every run since has seen the value.
+    Keeping the field list in one function, rather than inline in the update
+    branch, is what stops the next added column repeating that.
+
+    Two rules that are easy to get backwards:
+
+    Refresh, don't blank. A field missing from one response must not erase
+    what an earlier response taught us, so most fields here only overwrite
+    when the incoming value is not None. Same additive contract as
+    normalizer.enrich_from_item_body. The exceptions are the ones that
+    describe current state rather than accumulated knowledge (price, and the
+    buying options that eBay always sends), which are meant to track reality
+    and so are copied unconditionally.
+
+    is_gtc is derived, not reported. It's inferred from an *absent* end date,
+    so it can't be copied on its own: it's recomputed from the stored state
+    after item_end_date settles, or a listing that gains a real end date
+    keeps claiming to be Good 'Til Cancelled forever.
+    """
+    # Re-derived rather than copied, because a seller revising a title from
+    # "Console" to "Console ONLY" changes what is being sold, and a stale
+    # classification would quietly keep it in the wrong comp set.
+    variant = extract_variant(fresh.title, existing.aspects, fresh.category)
+    existing.title = fresh.title
+    existing.lot_size = variant.lot_size
+    existing.completeness = variant.completeness
+    existing.has_defect = variant.has_defect
+    existing.is_accessory = variant.is_accessory
+    existing.price_is_from = variant.price_is_from
+    existing.capacity_gb = variant.capacity_gb
+    existing.spec_generation = variant.spec_generation
+    existing.form_factor = variant.form_factor
+    existing.model_key = variant.model_key
+    existing.variant_signals = variant.signals or {}
+
+    # Current state: always authoritative, always overwritten.
+    existing.price = fresh.price
+    existing.currency = fresh.currency
+    existing.is_auction = fresh.is_auction
+    existing.accepts_best_offer = fresh.accepts_best_offer
+
+    # Shipping cost and its estimated flag move together: the flag describes
+    # the cost, so refreshing one without the other can mark a firm price as
+    # an estimate (or worse, the reverse).
+    if fresh.shipping_cost is not None:
+        existing.shipping_cost = fresh.shipping_cost
+        existing.shipping_estimated = fresh.shipping_estimated
+
+    if fresh.epid is not None:
+        existing.epid = fresh.epid
+    if fresh.bid_count is not None:
+        existing.bid_count = fresh.bid_count
+    if fresh.seller_feedback_score is not None:
+        existing.seller_feedback_score = fresh.seller_feedback_score
+    if fresh.seller_feedback_percent is not None:
+        existing.seller_feedback_percent = fresh.seller_feedback_percent
+    if fresh.qualified_programs is not None:
+        existing.qualified_programs = fresh.qualified_programs
+
+    # item_end_date and is_gtc are deliberately NOT touched here. Search
+    # responses never carry itemEndDate, so `fresh` always has None for it and
+    # copying that would erase a real value the disappearance check learned
+    # from a full item body. Recomputing is_gtc from it is worse still: that
+    # is the inference that marked every non-auction listing GTC.
+    # Only enrich_from_item_body may set either.
+    # See docs/decisions/0011-ebay-does-not-404-ended-listings.md.
+
+    # Deliberately not refreshed: images (a changed photo would desync the
+    # image_hash relist detection depends on, so that needs its own decision),
+    # and aspects/sold_quantity (getItem-only, owned by enrich_from_item_body).
 
 
 @dataclass
@@ -107,26 +188,31 @@ def ingest_saved_search(
             existing = existing_by_id.get(listing.source_id)
 
             if existing:
-                # Record the price *before* overwriting it, and only when it
-                # actually moved. Overwriting in place used to make price
-                # drops (a strong deal signal) invisible, and left the stage 6
-                # price chart with nothing to draw.
+                # Capture what's stored, refresh, then compare: an observation
+                # is written exactly when the stored values actually moved.
+                # Comparing the incoming values instead would log a spurious
+                # change every run for any listing whose shipping is absent
+                # from a response, since _refresh_from_summary declines to
+                # blank a known cost and the two would never agree again.
+                #
+                # Recording the old price at all matters because overwriting
+                # in place used to make price drops (a strong deal signal)
+                # invisible, and left the stage 6 price chart nothing to draw.
                 # See docs/decisions/0004-trustworthy-comp-data.md.
-                if (existing.price, existing.shipping_cost) != (listing.price, listing.shipping_cost):
+                previous = (existing.price, existing.shipping_cost)
+                _refresh_from_summary(existing, listing)
+
+                if previous != (existing.price, existing.shipping_cost):
                     session.add(
                         PriceObservation(
                             listing_id=existing.id,
-                            price=listing.price,
-                            shipping_cost=listing.shipping_cost,
+                            price=existing.price,
+                            shipping_cost=existing.shipping_cost,
                             observed_at=now,
                         )
                     )
                     result.price_changes += 1
 
-                existing.price = listing.price
-                existing.shipping_cost = listing.shipping_cost
-                existing.is_auction = listing.is_auction
-                existing.accepts_best_offer = listing.accepts_best_offer
                 existing.last_seen_at = listing.last_seen_at
                 # Seen in a search means alive, so a listing that was queued
                 # for disappearance confirmation is off the hook.
@@ -144,6 +230,17 @@ def ingest_saved_search(
                 session.add(existing)
                 result.updated += 1
             else:
+                variant = extract_variant(listing.title, listing.aspects, listing.category)
+                listing.lot_size = variant.lot_size
+                listing.completeness = variant.completeness
+                listing.has_defect = variant.has_defect
+                listing.is_accessory = variant.is_accessory
+                listing.price_is_from = variant.price_is_from
+                listing.capacity_gb = variant.capacity_gb
+                listing.spec_generation = variant.spec_generation
+                listing.form_factor = variant.form_factor
+                listing.model_key = variant.model_key
+                listing.variant_signals = variant.signals or {}
                 if listing.images:
                     listing.image_hash = image_hasher(listing.images[0])
                 session.add(listing)

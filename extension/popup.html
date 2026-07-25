@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body { width: 240px; margin: 0; padding: 14px;
+             font: 13px/1.4 -apple-system, Segoe UI, Roboto, sans-serif;
+             background: #14161a; color: #e8e8ea; }
+      button { width: 100%; padding: 9px; cursor: pointer; border-radius: 6px;
+               border: 1px solid #3a4049; background: #2a2f38; color: #e8e8ea;
+               font-size: 13px; }
+      button:disabled { opacity: .45; cursor: default; }
+      p { margin: 10px 0 0; opacity: .65; font-size: 11px; line-height: 1.45; }
+    </style>
+  </head>
+  <body>
+    <button id="capture">Capture this listing</button>
+    <p id="status">Works on a Depop or Facebook Marketplace listing page.</p>
+    <script src="popup.js"></script>
+  </body>
+</html>
