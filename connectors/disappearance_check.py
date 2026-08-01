@@ -38,6 +38,7 @@ from api.settings import settings
 from connectors.ebay import EbayClient
 from connectors.normalizer import enrich_from_item_body, listing_has_ended
 from connectors.sale_confidence import find_relist, score_sale
+from systems.preflight import assert_schema_current
 from systems.ratelimit import QuotaExhaustedError
 
 
@@ -195,6 +196,7 @@ def check_listings_for_source(
     """
     client = client or PULL_BASED_SOURCES[source]()
     db_engine = db_engine or default_engine
+    assert_schema_current(db_engine, Listing)
     now = now or datetime.now(timezone.utc)
 
     result = CheckResult()

@@ -98,12 +98,14 @@ Three measurements from stage 3a that 3b and 4 should be designed against, all r
 **5. Backend API**
 
 - [x] FastAPI: deal feed endpoint (`GET /deals`, `GET /deals/{id}`)
-- [ ] FastAPI: auth, saved-search CRUD
+- [x] FastAPI: saved-search CRUD (`/saved-searches`, quota-guarded, ADR `0016`)
+- [x] FastAPI: auth (API key on writes, fail-closed, ADR `0017`)
 - [x] Alerting (Discord webhook, `systems/deal_scan.py`, de-duplicated so a deal is announced once)
 
 **6. Frontend**
 
-- [ ] React dashboard: deal feed, comp explanation view, watchlist, price chart
+- [x] React dashboard: deal feed, comp explanation view, price chart, saved-search management (`frontend/`)
+- [ ] Watchlist (the one view from the original plan not yet built)
 
 **7. Deploy + polish**
 

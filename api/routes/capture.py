@@ -5,11 +5,10 @@ docs/decisions/0010-depop-is-push-based-now.md. The browser extension parses a
 page the user is already viewing and posts it here; no server in this project
 ever requests one of those pages itself.
 
-SECURITY, recorded rather than assumed: these routes are unauthenticated,
-which is only acceptable because the whole stack is local-only right now. The
-capture endpoint writes to the database from an unauthenticated request, so it
-must not be exposed on a public interface before stage 5's auth lands. ADR
-0010 notes the same thing.
+POST requires an X-API-Key header (docs/decisions/0017-api-key-auth.md). The
+GET is left open: it reads the user's own corpus and the extension needs it to
+show a match. Note that writes fail CLOSED when no key is configured, so a
+fresh checkout refuses captures until API_KEY is set, on purpose.
 """
 
 from __future__ import annotations
@@ -19,6 +18,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel
 
+from api.auth import RequireApiKey
 from connectors.capture import CapturedListing, save_capture
 from ml.match import MatchResult, match_listing
 from systems.queue import enqueue_embed_pending
@@ -153,7 +153,12 @@ def _to_match_read(result: MatchResult) -> MatchRead:
     )
 
 
-@router.post("", response_model=CaptureRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=CaptureRead,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[RequireApiKey],
+)
 def capture(payload: CapturedListing, analyse: bool = Query(True)) -> CaptureRead:
     """Store a listing the user captured, and match it against eBay.
 

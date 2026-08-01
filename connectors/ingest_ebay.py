@@ -21,6 +21,7 @@ from connectors.ebay import EbayClient
 from connectors.image_hash import fetch_and_hash
 from connectors.normalizer import normalize_ebay_item
 from ml.extract import extract_variant
+from systems.preflight import assert_schema_current
 from systems.ratelimit import QuotaExhaustedError
 
 logger = logging.getLogger(__name__)
@@ -283,8 +284,20 @@ def ingest_all(
     zero ingested listings.
     """
     db_engine = db_engine or default_engine
+    # Before spending any quota: confirm this process is not running code
+    # older than the database. A stale worker fails per-search inside the
+    # isolation below, which reports success and ingests nothing.
+    assert_schema_current(db_engine, Listing, SavedSearch)
+
     with Session(db_engine) as session:
-        saved_searches = session.exec(select(SavedSearch)).all()
+        # Disabled searches cost nothing, which is the entire point of the
+        # flag: each enabled search is one Browse call per run, forever. This
+        # filter is the one place a bug would be invisible (the search simply
+        # keeps running and quietly keeps spending), so a test asserts it.
+        # See docs/decisions/0016-saved-search-crud.md.
+        saved_searches = session.exec(
+            select(SavedSearch).where(col(SavedSearch.enabled).is_(True))
+        ).all()
 
     # One HTTP client for every image fetched across the whole run. The
     # module-level httpx.get() the hasher defaults to completes a fresh
@@ -318,6 +331,18 @@ def ingest_all(
     finally:
         if http_client is not None:
             http_client.close()
+
+    # Per-search isolation means a systematic fault looks like a successful
+    # run that happened to find nothing. Say so loudly instead: if most
+    # searches failed, something is wrong with the code or the database, not
+    # with 60 separate eBay queries.
+    if total.searches_run and total.searches_failed >= max(2, total.searches_run // 2):
+        logger.error(
+            "%d of %d searches failed. That is a systematic fault (stale worker code, "
+            "schema drift, or credentials), not bad luck across independent queries.",
+            total.searches_failed,
+            total.searches_run,
+        )
 
     return total
 

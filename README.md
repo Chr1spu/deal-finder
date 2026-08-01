@@ -6,7 +6,7 @@ A secondhand-marketplace deal finder. Ingests listings, extracts image and text 
 
 Full plan: [PROJECT_PLAN.md](PROJECT_PLAN.md).
 
-**Status:** Stage 3a done (CLIP embeddings in pgvector), cross-source capture working end to end for Depop and Facebook Marketplace. Sold-price history is accumulating. Next is stage 3b, NLP attribute extraction.
+**Status:** Stages 1-4 complete and running. Sold-price history is accumulating from disappearance tracking, listings are embedded and attribute-extracted, and the valuation engine produces deal scores. Stage 5 is done apart from the frontend: `GET /deals` serves a ranked feed, saved searches are managed over the API, writes are authenticated, and new deals post to a Discord webhook. Next is the React dashboard (stage 6) and deployment (stage 7).
 
 ### Capturing a listing from Depop or Facebook
 
@@ -14,13 +14,18 @@ Neither can be polled server-side: Facebook's ToS forbids it, and Depop returns 
 
 1. Start the API (`uv run uvicorn api.main:app`) and the workers.
 2. Load `extension/` as an unpacked extension (`chrome://extensions` with Developer Mode on).
-3. Open a Depop or Facebook Marketplace listing and click the toolbar button.
+3. Paste your `API_KEY` into the extension popup's key field (stored per-install, never committed).
+4. Open a Depop or Facebook Marketplace listing and click the toolbar button.
 
 The overlay shows what comparable eBay listings are **asking**, alongside the candidates it matched. It deliberately does not compute a "% below market" figure: those are asking prices, not sold prices, and the number would imply a precision the data does not yet have.
 
 ## Setup
 
 1. Copy `.env.example` to `.env` and fill in eBay Browse API credentials (developer.ebay.com).
+   Also set `API_KEY` to any long random string (`python -c "import secrets; print(secrets.token_urlsafe(32))"`).
+   **Leaving it empty refuses all writes rather than disabling the check**, so captures and
+   saved-search changes will return 503 until it is set. That is deliberate: an unset secret
+   must never mean an open endpoint. See [docs/decisions/0017](docs/decisions/0017-api-key-auth.md).
 2. **Choose where the virtualenv lives, before installing anything.** If this repo sits in a cloud-synced folder (OneDrive, Dropbox), point uv somewhere else first, because the ML dependencies take the venv to roughly 3 GB and sync tools do not read `.gitignore`:
    ```
    setx UV_PROJECT_ENVIRONMENT C:\venvs\deal-finder     # Windows, persists for future shells
@@ -32,8 +37,36 @@ The overlay shows what comparable eBay listings are **asking**, alongside the ca
 5. `uv run alembic upgrade head` to create the schema.
 6. `uv run python -m connectors.ingest_ebay` to run every saved search into the DB.
 7. `uv run --group ml python -m ml.embed_listings` to embed listings that have no vector yet. Safe to re-run: it is idempotent and resumes where it stopped.
-8. `uv run uvicorn api.main:app --reload`, then `GET http://localhost:8000/listings`.
+8. `uv run uvicorn api.main:app --reload`, then:
+   - `GET /deals` the ranked deal feed (served from the last scheduled scan)
+   - `GET /deals/{id}` value one listing on demand
+   - `GET /saved-searches` the keywords in use, with the daily call budget they cost
+   - `GET /listings` the raw corpus, paginated
 9. `uv run pytest` to run the test suite. No live services required: DB tests use in-memory SQLite, eBay calls are mocked, and the few tests needing real Postgres or torch skip themselves when unavailable.
+
+### The dashboard
+
+```
+cd frontend
+npm install
+npm run dev        # http://localhost:5173
+```
+
+Deal feed with the comps behind every score, saved-search management with the
+live eBay call budget, and a price chart. Reads work without a key; changing
+searches needs the `API_KEY` pasted into the field in the header.
+
+The Vite dev server proxies `/api` to `127.0.0.1:8000`, so the browser makes
+same-origin requests and CORS never enters the picture. It is `127.0.0.1` and
+not `localhost` on purpose: Node resolves `localhost` to IPv6 first and uvicorn
+binds IPv4, which otherwise produces a 500 from the proxy while the API answers
+direct requests perfectly.
+
+`package.json` overrides rollup to `@rollup/wasm-node`. That is not a
+preference: on some Windows machines an Application Control policy refuses to
+load rollup's unsigned native binary, and the error rollup prints blames npm's
+optional-dependency bug rather than saying so. The WASM build is the same
+rollup with no native module.
 
 ### Running the workers
 
@@ -69,7 +102,16 @@ Run **exactly one of each**. Duplicate or stale workers have twice caused silent
                                                           │
                                                           ▼
                                           candidates + what eBay is ASKING
+                                                          │
+  sold listings (likely_sold) ──────────► ml/valuation ◄──┘
+     gated on sale_confidence,            estimate, confidence, deal score
+     weighted by price_confidence         (no estimate below 3 comps)
+                                                          │
+                                                          ▼
+                                    GET /deals  +  Discord alerts
 ```
+
+**A note on what the deal score is not.** Comps are listings that *left the market*, which means sold, expired unsold, or withdrawn: eBay does not distinguish them. Estimates are therefore biased high and deal scores optimistic, which is why every response ships its comps and caveats rather than a bare percentage. See [docs/decisions/0014](docs/decisions/0014-valuation-and-deal-scoring.md).
 
 Everything runs on Docker Compose (Postgres + pgvector, Redis) with RQ for job scheduling. The eBay connector lives inside a measured 5,000 calls/day budget; see [docs/decisions/0003](docs/decisions/0003-ebay-call-budget.md) for why that shapes so much of the design.
 

@@ -1,5 +1,106 @@
 # Devlog
 
+## 2026-08-01 - React dashboard, and the feed auditing the extractor in real time
+
+**Did:**
+- `frontend/`: Vite + React. Deal feed with expandable comps, saved searches with the live quota budget, stepped price chart. Added `GET /listings/{id}/prices` for the chart.
+- **The comp explanation view is the point.** Every correctness bug in this project has been found by reading the comps behind a deal score, so they are one click from the feed rather than something to go digging for.
+- 357 tests passing, mypy clean across 71 files.
+
+**Environment, and it took most of the effort:**
+- Node was not installed at all. `winget install OpenJS.NodeJS.LTS` hung for 35 minutes and wrote nothing, almost certainly waiting on a UAC prompt that cannot be shown to a non-interactive session. Killed it and used a portable Node zip extracted to `C:
+odejs`, which needs no elevation and touches no system state.
+- Then `vite build` failed with `ERR_DLOPEN_FAILED`. Rollup blames npm's optional-dependency bug in its error message, and that was wrong: the real cause was four lines further down, **"An Application Control policy has blocked this file"**. Windows Application Control refuses to load rollup's unsigned native binary on this machine. esbuild loads fine, so it is that specific binary rather than native modules in general, but Vite 6 imports rollup even for the dev server, so the whole toolchain was dead.
+- Resolved with an npm override to `@rollup/wasm-node`, the same rollup compiled to WASM with no native module. That is a policy-compliant substitute, not a way around the policy. Build works, dev server works.
+- Vite's proxy then returned 500 while the API answered 200 to direct requests. Cause: Node 18+ resolves `localhost` to IPv6 `::1` first and uvicorn binds IPv4 only, so the proxy got `ECONNREFUSED ::1:8000`. The target is now `127.0.0.1` explicitly.
+
+**The feed immediately did its job.** Within minutes of the dashboard rendering, the top three "deals" were:
+
+```
+96%  $35.00 vs $950.00   OEM MSI RTX 3090 Suprim X Replacement Fans (Set of 3)
+95%  $44.99 vs $925.00   MSI GeForce RTX 5070Ti 16GB Ventus
+91%  $79.99 vs $899.99   Nvidia GeForce RTX 4080 Video Heatsink Fan
+```
+
+Two accessories, and one was **a regression I had introduced**: `heat\s?sinks?` was dropped from the strong-accessory vocabulary when the box terms came out of it, and nothing caught that until the ranking put it first. Fixed, along with three more real gaps the next scan exposed:
+
+- `"Replacement Fans (Set of 3)"` matched nothing. Added, deliberately *not* as bare "fan": "3 fan" and "triple fan" describe a real card's own cooler and are everywhere in genuine titles.
+- `"Only Cooling System"` slipped past because the rule matched `<noun> ... only` and not the inverted `only ... <noun>`. Sellers write both.
+- `"PCB Donor Board"` at $87 against a $4,600 card. A donor board exists to be stripped for parts, which is definitionally not the product.
+
+After those, the feed is clean for the first time: six plausible real products, no accessories, no from-prices, no parts.
+
+**Worth stating plainly:** four separate correctness bugs, one of them a regression, found by *looking at the output* rather than by any test. Ranking by "most extreme" sorts the pipeline's worst failures to the top for free, and building the UI made that a glance instead of a script.
+
+**Next:** stage 7, Docker Compose deploy. The extension still has never run against a live page.
+
+
+## 2026-08-01 - Stale workers killed ingestion silently; model_key becomes an exact match
+
+**Found: intake had been dead for roughly twelve hours and looked healthy.**
+- Migrations `0013`-`0015` added the NOT NULL columns `is_accessory`, `price_is_from` and `enabled`. The long-lived RQ workers had imported `api.models.Listing` before those fields existed, so every INSERT omitted them and Postgres rejected it with `NotNullViolation`.
+- **Nothing surfaced it.** `ingest_all` isolates errors per search (deliberately, so one bad search cannot kill 64), so each failure was logged and swallowed, the job reported "Successfully completed", the failed-job registry stayed empty, and `failed_job_count` stayed at zero. The only symptom was that new listings stopped appearing, which is indistinguishable from a quiet day on eBay. Only 4 of 64 searches had run in six hours: the ones that happened to find nothing new.
+- Restarting the workers from the current tree fixed it immediately: 885 new listings and 5,354 refreshed in the first 30 minutes.
+- The 11 jobs in the failed registry all date from 2026-07-18, the earlier stale-worker/quota era. Nothing has failed since.
+
+**Two guards, because this is the third time a long-lived process has silently run stale code:**
+- `systems/preflight.py::assert_schema_current` runs at the top of `ingest_all` and `check_listings_for_source`. One query: if the database has required columns the process's models do not know about, it raises with the column names and instructions to restart. Only that direction is checked, since a model knowing about a column the DB lacks is the ordinary un-applied-migration case that already fails loudly.
+- `ingest_all` now logs an **error** when half or more searches fail. Per-search isolation is right, but it converts a systematic fault into something that looks like a quiet day, so the aggregate needs its own voice.
+- Added the no-pile-up guard to `enqueue_ingest_all` and `enqueue_disappearance_check`, which embedding and the deal scan already had. Both spend the scarcest resource in the project, so two at once wastes quota and races on the same rows. (Confirmed by racing one myself while testing.)
+
+**Measured, then changed: `model_key` is now an exact match.**
+
+Comps previously kept candidates whose `model_key` was NULL, on the same "unstated is not a mismatch" rule as every other spec filter. Over 120 listings that have a model key:
+
+| | median comps | median spread | too thin (<3) |
+|---|---|---|---|
+| NULL allowed | 30 | **8.69x** | 10/120 |
+| exact match | 16 | **2.33x** | 21/120 |
+
+A 3.7x reduction in price spread for 16 comps still well clear of the 3-comp minimum, at the cost of 9% more listings getting no valuation at all. `0014` already treats refusing to answer as correct when evidence is thin, so that is the right side of the trade.
+
+The reason it differs from the other filters is what the field *claims*. Capacity, generation and form factor are attributes a title may legitimately omit while still describing the same product. `model_key` is a product identity, so on a listing that has one, a candidate naming no model at all is not unstated, it is unidentified. That is what let "Gigabyte 3060 Ti" (no "RTX" prefix, so NULL) comp an RTX 3080 Ti.
+
+- 352 tests passing, mypy clean across 71 files.
+
+**Next:** the React dashboard. Node was not installed on this machine at all, so that had to be resolved first.
+
+
+## 2026-08-01 - Saved-search CRUD, with the quota guard that is the point of it
+
+**Did:**
+- CRUD at `/saved-searches`: list with a budget summary, create, enable/disable, delete. ADR `0016`, migration `0015` adds an `enabled` flag. Before this the 64 searches came from a seed migration and could only be changed with SQL.
+- **The create path refuses rather than warns.** Each enabled search costs one Browse call per ingest run, which at a 2-hour interval is 12 calls/day forever. `POST` computes the projected daily cost including the new search and returns `409` with the arithmetic if it would exceed the allowance. Live: 64 enabled x 12 = 768 ingest + 2,800 checking = 3,568 of 5,000, room for **119 more searches**.
+- Re-enabling is quota-checked identically, since it costs the same calls and would otherwise be a trivial bypass of the guard.
+- `ingest_all` now filters on `enabled`. That is the one place a bug here would be invisible: a disabled search that still runs simply keeps spending, silently and forever, so a test asserts `searches_run == 1` when one of two is disabled.
+- 332 tests passing (up from 318), mypy clean across 67 files.
+
+**Decided:**
+- A hard refusal, not a warning. Warnings get read once, and this failure is delayed and silent: the quota runs out partway through some later day and ingestion dies with it. That exact combination cost this project seven hours of downtime in `0003`.
+- The error body carries the arithmetic and the remedy, so a refusal is actionable rather than a wall. A test asserts the advertised remedy (disable something to free a slot) actually works, because an error message that lies is worse than a bare 409.
+- **Disabling is the default gesture, not deleting.** `last_result_total` and `last_run_at` are accumulated observability, not config, and a search paused to free quota is usually meant to come back. Deleting is still offered and deliberately does not touch listings that search already ingested: those are comp data belonging to the corpus, not to the query that happened to find them.
+- Keywords normalize whitespace and de-duplicate case-insensitively, since two searches differing only in capitalisation return the same eBay results and cost twice.
+- The ceiling reuses `estimate_daily_calls` rather than duplicating the arithmetic, so it tracks `ingest_interval_seconds` and `disappearance_check_budget` automatically. Halve the ingest interval and the number of searches that fit halves too, with nobody remembering to update a constant.
+
+**Broke / debugged:**
+- FastAPI refused to start: a `204 No Content` route with a `-> None` annotation makes it infer a response model, and a 204 must carry no body. Fixed with an explicit `response_class=Response`.
+
+**Worth noting:** this closes a gap `0003` left open without saying so. That ADR protected the quota from the *checker* with a budget and a reserve, and left the *ingest* side protected only by the fact that nobody could easily add searches. Building the CRUD removed that accidental protection, so the guard had to be built in the same change rather than after it.
+
+**Then: API key auth on writes (ADR `0017`).**
+- `POST /capture` and all three `/saved-searches` mutations now require an `X-API-Key` header. Reads stay open: they expose the user's own corpus, the frontend and the extension both need them, and gating them buys little against the threat that actually matters.
+- **Writes fail CLOSED when no key is configured**, returning 503 with instructions rather than allowing the request. The conventional inverse ("empty key disables auth") optimises for the first five minutes of local setup and produces exactly one catastrophic outcome: deploy, forget the variable, every write endpoint public with nothing anywhere to notice. 503 rather than 401 because the request is not unauthorized, the server is not set up, and conflating them sends someone hunting for a credential that does not exist yet.
+- The extension gained a key field in its popup, stored in `chrome.storage.local` so the repo never contains the secret, and it distinguishes the two auth failures (401 = fix the extension's key, 503 = set `API_KEY` on the server).
+- A parametrized test asserts *every* mutating route is protected, rather than spot-checking, since a new write endpoint that forgets the dependency is a silent hole.
+- Verified live: reads 200 without a key, writes 401 without or with a wrong key, 201 with the real one.
+- 347 tests passing (up from 318), mypy clean across 69 files.
+
+**Deliberately not done:** per-key scopes, rate limiting, and an audit trail. This authenticates the operator, not the data, and a stolen key can still add saved searches. Those are the right gaps to defer for a single-user local tool and the right first questions if it ever becomes multi-user.
+
+**Next:** the frontend, or the extension live test. `GET /deals` already returns everything a dashboard needs.
+
+
+
 ## 2026-07-25 - Multi-variant listings, and making the deal feed reachable
 
 **Did:**

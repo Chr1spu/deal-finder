@@ -3,7 +3,7 @@
   "name": "Deal Finder Capture",
   "version": "0.1.0",
   "description": "Capture the listing you're viewing on Depop or Facebook Marketplace and value it against eBay prices.",
-  "permissions": ["activeTab", "scripting"],
+  "permissions": ["activeTab", "scripting", "storage"],
   "host_permissions": [
     "https://www.depop.com/*",
     "https://www.facebook.com/*",

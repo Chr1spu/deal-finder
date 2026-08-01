@@ -7,6 +7,17 @@ const SUPPORTED = /^https:\/\/(www\.)?(depop\.com\/products\/|(www|web)\.faceboo
 
 const button = document.getElementById("capture");
 const status = document.getElementById("status");
+const apiKeyInput = document.getElementById("apiKey");
+
+// Stored per-install in chrome.storage rather than committed, so the repo
+// never contains the secret. Writes fail closed server-side when no key is
+// configured there either (docs/decisions/0017-api-key-auth.md).
+chrome.storage.local.get("apiKey", (stored) => {
+  if (stored.apiKey) apiKeyInput.value = stored.apiKey;
+});
+apiKeyInput.addEventListener("change", () => {
+  chrome.storage.local.set({ apiKey: apiKeyInput.value.trim() });
+});
 
 chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
   const tab = tabs[0];

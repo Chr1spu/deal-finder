@@ -203,8 +203,18 @@ _ACCESSORY_NOUN_RE = re.compile(rf"\b(?:{_ACCESSORY_NOUN})\b", re.IGNORECASE)
 # expensive genuine items in the corpus. The genuinely accessory phrasing is
 # "Retail Box ONLY", which _ANY_ACCESSORY_ONLY_RE already covers.
 _STRONG_ACCESSORY = (
-    r"backplates?|back\s?plates?|shrouds?|water\s?blocks?|waterblocks?|"
-    r"nvlink|cooling\s?fans?|fan\s?assembly|thermal\s?pads?|empty\s+box|shell"
+    # heat sinks were dropped from this list by accident when the box terms
+    # came out, and the deal feed surfaced it within minutes: a "Video
+    # Heatsink Fan" at $79.99 ranked as a 91% discount against a $900 card.
+    r"backplates?|back\s?plates?|heat\s?sinks?|shrouds?|water\s?blocks?|waterblocks?|"
+    r"nvlink|cooling\s?fans?|fan\s?assembly|thermal\s?pads?|empty\s+box|shell|"
+    # "Replacement Fans (Set of 3)". Deliberately NOT bare "fan": "3 fan" and
+    # "triple fan" describe a real card's own cooler and are extremely common
+    # in genuine GPU titles.
+    r"replacement\s+fans?|spare\s+fans?|cooling\s+system|"
+    # A donor board exists to be stripped for parts, which is definitionally
+    # not the product. "RTX 5090 PCB Donor Board" ranked as a 98% discount.
+    r"donor|pcb\s+only|core\s+only|die\s+only"
 )
 # An accessory noun preceded by one of these is INCLUDED with the product,
 # not the product itself. This is the third time the same shape has appeared:
@@ -225,9 +235,16 @@ _STRONG_ACCESSORY_RE = re.compile(rf"\b(?:{_STRONG_ACCESSORY})\b", re.IGNORECASE
 # "X ONLY" where X is any accessory noun. Kept separate from the vocabulary
 # above because "box only" appears in both, and an earlier version required a
 # *second* "only" after it, so "Retail Box ONLY" never matched.
+_ACCESSORY_ONLY_VOCAB = (
+    rf"{_STRONG_ACCESSORY}|box|case|cover|packaging|manual|guide|cable|bracket"
+)
+# Both word orders. Sellers write "Heatsink ONLY" and "ONLY Cooling System"
+# interchangeably, and matching only the first let the second straight
+# through: a "RTX 5090 Only Cooling System" ranked as a 99% discount against
+# a $4,600 card.
 _ANY_ACCESSORY_ONLY_RE = re.compile(
-    rf"\b(?:{_STRONG_ACCESSORY}|box|case|cover|packaging|manual|guide|cable|bracket)\b"
-    r"[^,]{0,24}\bonly\b",
+    rf"\b(?:{_ACCESSORY_ONLY_VOCAB})\b[^,]{{0,24}}\bonly\b"
+    rf"|\bonly\b[^,]{{0,24}}\b(?:{_ACCESSORY_ONLY_VOCAB})\b",
     re.IGNORECASE,
 )
 # "for" is the precision gate. An accessory noun alone appears in 2.9% of

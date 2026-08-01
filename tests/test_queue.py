@@ -17,6 +17,9 @@ class FakeQueue:
 
     def __init__(self):
         self.count = 0
+        # Real Queues expose the waiting jobs; the enqueue helpers read this
+        # to skip when an identical job is already pending.
+        self.jobs: list = []
         self.enqueued = []
 
     def enqueue(self, fn, *args, **kwargs):
@@ -77,3 +80,24 @@ def test_embedding_goes_on_its_own_queue():
     job and kill it on `import torch`."""
     assert ML_QUEUE_NAME != QUEUE_NAME
     assert get_ml_queue.__module__ == "systems.queue"
+
+
+def test_ingest_and_check_skip_when_one_is_already_queued():
+    """Both spend the scarcest resource in the project, so two running at once
+    wastes eBay quota and races on the same rows. Embedding and the deal scan
+    already skipped; these two did not, which was an inconsistency rather than
+    a decision."""
+
+    class Pending:
+        def __init__(self, name):
+            self.func_name = name
+
+    queue = FakeQueue()
+    queue.jobs = [Pending("connectors.ingest_ebay.ingest_all")]
+    assert enqueue_ingest_all(queue=queue) is None
+    assert queue.enqueued == []
+
+    queue = FakeQueue()
+    queue.jobs = [Pending("connectors.disappearance_check.check_all_sources")]
+    assert enqueue_disappearance_check(queue=queue) is None
+    assert queue.enqueued == []

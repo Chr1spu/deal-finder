@@ -7,7 +7,7 @@ thousand plus a 512-float vector each. These tests pin the shape of the fix.
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from api.db import get_session
 from api.main import app
@@ -128,3 +128,70 @@ def test_filters_by_source_and_status(client, test_engine):
 
     by_status = client.get("/listings", params={"status": "likely_sold"}).json()
     assert [row["status"] for row in by_status] == ["likely_sold"]
+
+
+# ------------------------------------------------------- price history
+
+
+def test_price_history_is_oldest_first(client, test_engine):
+    from datetime import datetime, timezone
+
+    from api.models import PriceObservation
+
+    with Session(test_engine) as session:
+        listing = make_listing(1)
+        session.add(listing)
+        session.commit()
+        session.refresh(listing)
+        for day, price in ((3, 300.0), (1, 100.0), (2, 200.0)):
+            session.add(
+                PriceObservation(
+                    listing_id=listing.id,
+                    price=price,
+                    shipping_cost=10.0,
+                    observed_at=datetime(2026, 8, day, tzinfo=timezone.utc),
+                )
+            )
+        session.commit()
+        listing_id = listing.id
+
+    points = client.get(f"/listings/{listing_id}/prices").json()
+
+    assert [p["price"] for p in points] == [100.0, 200.0, 300.0]
+    assert points[0]["total_cost"] == 110.0
+
+
+def test_unknown_shipping_leaves_total_cost_null_rather_than_equal_to_price(client, test_engine):
+    """Charting unknown shipping as zero would draw a delivered-cost line that
+    never existed, and it biases in the dangerous direction."""
+    from datetime import datetime, timezone
+
+    from api.models import PriceObservation
+
+    with Session(test_engine) as session:
+        listing = make_listing(2)
+        session.add(listing)
+        session.commit()
+        session.refresh(listing)
+        session.add(
+            PriceObservation(
+                listing_id=listing.id,
+                price=50.0,
+                shipping_cost=None,
+                observed_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+            )
+        )
+        session.commit()
+        listing_id = listing.id
+
+    point = client.get(f"/listings/{listing_id}/prices").json()[0]
+
+    assert point["shipping_cost"] is None
+    assert point["total_cost"] is None
+
+
+def test_a_listing_with_no_observations_returns_an_empty_list(client, test_engine):
+    seed(test_engine, 1)
+    with Session(test_engine) as session:
+        listing_id = session.exec(select(Listing)).first().id
+    assert client.get(f"/listings/{listing_id}/prices").json() == []

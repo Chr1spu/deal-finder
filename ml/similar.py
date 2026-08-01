@@ -114,10 +114,6 @@ def find_similar_to_vector(
             col(Listing.price_is_from).is_(False),
         )
 
-    # Every spec filter follows the same rule: applied only when the *query*
-    # listing states a value, and unstated candidates are always kept. 89% of
-    # titles say nothing about completeness, so requiring a match on a silent
-    # field would discard most of the corpus rather than sharpen it.
     if category is not None:
         # Category is a HARD filter, unlike the spec fields below, because it
         # is present on essentially every listing and a mismatch is never
@@ -127,12 +123,29 @@ def find_similar_to_vector(
         # no GPU model, so every spec filter passed it through as "unstated".
         statement = statement.where(Listing.category == category)
 
+    # model_key is an EXACT match: a candidate with no model key is excluded
+    # rather than kept, unlike every other spec filter below.
+    #
+    # The distinction is what the field claims. Capacity, generation and form
+    # factor are *attributes* a title may legitimately omit while still
+    # describing the same product. model_key is a *product identity*, so on a
+    # listing that has one, a candidate whose title names no model at all is
+    # not "unstated", it is unidentified. Measured over 120 listings that have
+    # a model key: allowing NULL gave 30 comps at an 8.69x price spread,
+    # requiring an exact match gave 16 comps at 2.33x. Nine percent more
+    # listings end up with too few comps to value, which 0014 already treats
+    # as the right answer when the evidence is thin.
+    if model_key is not None:
+        statement = statement.where(col(Listing.model_key) == model_key)
+
+    # The rest keep unstated rows: 89% of titles say nothing about
+    # completeness, so requiring a match on a usually-silent field would
+    # discard most of the corpus rather than sharpen it.
     for value, column in (
         (completeness, Listing.completeness),
         (capacity_gb, Listing.capacity_gb),
         (spec_generation, Listing.spec_generation),
         (form_factor, Listing.form_factor),
-        (model_key, Listing.model_key),
     ):
         if value is not None:
             statement = statement.where((col(column) == value) | col(column).is_(None))

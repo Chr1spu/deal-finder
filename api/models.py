@@ -332,15 +332,25 @@ class ListingRead(SQLModel):
 class SavedSearch(SQLModel, table=True):
     """A keyword/location config that ingestion runs against.
 
-    No CRUD or auth yet (that's stage 5's "saved-search CRUD"). For now rows
-    come from a seed migration or get added by hand, per stage 1's scope of
-    "saved-search config, no UI yet."
+    Each enabled search costs exactly one Browse call per ingest run, which at
+    a 2-hour interval is 12 calls/day forever. That is why the CRUD routes
+    refuse to add one that would exceed the daily allowance rather than
+    warning about it: the failure is delayed and silent, and it is the failure
+    that took this pipeline down for seven hours once already.
+    See docs/decisions/0016-saved-search-crud.md.
     """
 
     id: int | None = Field(default=None, primary_key=True)
 
     keyword: str
     location: str | None = None
+
+    # Disabling frees the search's 12 calls/day without discarding the
+    # observability below. Preferred over deletion: a search paused to make
+    # room is usually meant to come back, and last_result_total is an
+    # accumulated record that a delete would throw away.
+    # See docs/decisions/0016-saved-search-crud.md.
+    enabled: bool = Field(default=True, index=True)
 
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

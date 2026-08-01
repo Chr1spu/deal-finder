@@ -111,6 +111,17 @@
     return null;
   }
 
+  // Read from chrome.storage rather than hardcoding, so the repo never
+  // contains the secret and the key is per-install.
+  async function apiKey() {
+    try {
+      const stored = await chrome.storage.local.get("apiKey");
+      return stored.apiKey || "";
+    } catch (e) {
+      return "";
+    }
+  }
+
   async function capture() {
     if (typeof window.__dealFinderParse !== "function") {
       return render("<div>No parser loaded for this page.</div>");
@@ -138,11 +149,25 @@
     render("<div>Capturing and matching against eBay...</div>");
 
     try {
+      const key = await apiKey();
       const resp = await fetch(API + "/capture", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-API-Key": key },
         body: JSON.stringify(payload),
       });
+      if (resp.status === 401 || resp.status === 503) {
+        // The two auth failures are worth distinguishing: one is a missing
+        // key in the extension, the other is a server with none configured.
+        const body = await resp.text();
+        return render(
+          "<div>" + (resp.status === 401
+            ? "The API rejected this extension's key. Set it from the toolbar popup."
+            : "The API has no API_KEY configured, so it refuses writes. Set API_KEY in .env.") +
+          "</div>" +
+          '<div style="opacity:.6;font-size:11px;margin-top:6px">' +
+          escapeHtml(body.slice(0, 200)) + "</div>"
+        );
+      }
       if (!resp.ok) {
         const body = await resp.text();
         return render(

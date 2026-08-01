@@ -72,13 +72,28 @@ EMBED_JOB_TIMEOUT = "2h"
 DEAL_SCAN_JOB_TIMEOUT = "1h"
 
 
+def _already_queued(queue: Queue, func_name: str) -> bool:
+    """Whether an identical job is already waiting.
+
+    Both eBay-facing jobs spend the scarcest resource in the project, so two
+    of them running at once wastes quota and races on the same rows. Embedding
+    and the deal scan already skip in this situation; these two did not, which
+    was an inconsistency rather than a decision.
+    """
+    return any(job.func_name.endswith(func_name) for job in queue.jobs)
+
+
 def enqueue_ingest_all(queue: Queue | None = None):
     queue = queue or get_queue()
+    if _already_queued(queue, "ingest_all"):
+        return None
     return queue.enqueue(ingest_all, job_timeout=INGEST_JOB_TIMEOUT)
 
 
 def enqueue_disappearance_check(queue: Queue | None = None):
     queue = queue or get_queue()
+    if _already_queued(queue, "check_all_sources"):
+        return None
     return queue.enqueue(check_all_sources, job_timeout=DISAPPEARANCE_CHECK_JOB_TIMEOUT)
 
 
@@ -112,6 +127,6 @@ def enqueue_deal_scan(queue: Queue | None = None):
     pgvector but no torch.
     """
     queue = queue or get_queue()
-    if any(job.func_name.endswith("run_deal_scan") for job in queue.jobs):
+    if _already_queued(queue, "run_deal_scan"):
         return None
     return queue.enqueue(run_deal_scan, job_timeout=DEAL_SCAN_JOB_TIMEOUT)

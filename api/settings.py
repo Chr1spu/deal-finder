@@ -97,6 +97,15 @@ class Settings(BaseSettings):
     # on, a missing one does not.
     min_comps_for_valuation: int = 3
 
+    # API key for write endpoints, see docs/decisions/0017-api-key-auth.md.
+    #
+    # Empty means writes are REFUSED, not that auth is off. That inversion is
+    # the whole point: the conventional "empty disables auth" saves five
+    # minutes of local setup and produces exactly one catastrophic outcome,
+    # which is deploying with the variable unset and every write endpoint
+    # public with nothing anywhere to notice.
+    api_key: str = ""
+
     # Deal feed and alerting.
     #
     # BOTH thresholds are required together, deliberately: a large apparent

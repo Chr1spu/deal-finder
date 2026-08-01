@@ -1,0 +1,121 @@
+:root {
+  --bg: #14161a;
+  --panel: #1b1e24;
+  --line: #2a2f38;
+  --text: #e8e8ea;
+  --muted: #9aa0aa;
+  --link: #8ab4f8;
+  --good: #6ee7a8;
+  --warn: #f0b866;
+  --error: #f08a8a;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+.app { max-width: 900px; margin: 0 auto; padding: 20px 16px 60px; }
+
+.top { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 18px; }
+.top h1 { font-size: 18px; margin: 0; }
+.top nav { display: flex; gap: 6px; }
+.apikey {
+  margin-left: auto; width: 220px; padding: 6px 8px; font-size: 12px;
+  background: var(--panel); color: var(--text);
+  border: 1px solid var(--line); border-radius: 6px;
+}
+
+.tab {
+  background: none; border: 1px solid transparent; color: var(--muted);
+  padding: 5px 10px; border-radius: 6px; cursor: pointer; font-size: 13px;
+}
+.tab.active { color: var(--text); border-color: var(--line); background: var(--panel); }
+
+.muted { color: var(--muted); }
+.small { font-size: 12px; }
+.warn { color: var(--warn); }
+.error { color: var(--error); }
+.link { color: var(--link); text-decoration: none; font-size: 13px; }
+
+.note {
+  background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--warn);
+  border-radius: 6px; padding: 9px 12px; font-size: 12px; color: var(--muted); margin: 12px 0;
+}
+
+.filters { display: flex; gap: 24px; flex-wrap: wrap; margin-bottom: 6px; }
+.filters label { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+
+/* --- deal cards --- */
+
+.card {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 8px; margin-bottom: 10px; overflow: hidden;
+}
+.card-head { display: flex; gap: 14px; align-items: center; padding: 12px 14px; cursor: pointer; }
+.card-head:hover { background: #1f232a; }
+
+.score {
+  min-width: 68px; text-align: center; font-size: 19px; font-weight: 600;
+  color: var(--warn); line-height: 1.1;
+}
+.score-high { color: var(--good); }
+.score-label { display: block; font-size: 10px; font-weight: 400; color: var(--muted); }
+
+.card-main { flex: 1; min-width: 0; }
+.card-main h3 {
+  margin: 0 0 4px; font-size: 14px; font-weight: 500;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.figures { display: flex; gap: 12px; align-items: center; font-size: 12px; flex-wrap: wrap; }
+.chevron { color: var(--muted); font-size: 10px; }
+
+/* Ordinal, not a probability, so it is a bar rather than a number that
+   invites being read as a percentage. */
+.conf { display: inline-block; width: 44px; height: 5px; background: var(--line); border-radius: 3px; }
+.conf-fill { display: block; height: 100%; background: var(--link); border-radius: 3px; }
+
+.card-body { padding: 4px 14px 14px; border-top: 1px solid var(--line); }
+.card-body h4 { font-size: 12px; color: var(--muted); font-weight: 500; margin: 14px 0 6px; }
+
+.comps { width: 100%; border-collapse: collapse; font-size: 12px; }
+.comps td { padding: 5px 6px; border-top: 1px solid var(--line); }
+.comps td:first-child { max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.comps a { color: var(--link); text-decoration: none; }
+.num { text-align: right; white-space: nowrap; }
+
+.chart { margin: 14px 0 4px; }
+.chart svg { width: 100%; height: 40px; display: block; }
+.chart-labels { display: flex; justify-content: space-between; font-size: 11px; margin-top: 2px; }
+
+.caveats { margin: 12px 0 0; padding-left: 16px; font-size: 11px; color: var(--muted); line-height: 1.5; }
+
+/* --- saved searches --- */
+
+.budget {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 8px; padding: 12px 14px; font-size: 13px; margin-bottom: 14px;
+}
+.add-row { display: flex; gap: 8px; margin-bottom: 12px; }
+.add-row input {
+  flex: 1; padding: 8px 10px; background: var(--panel); color: var(--text);
+  border: 1px solid var(--line); border-radius: 6px;
+}
+.add-row button {
+  padding: 8px 16px; background: #2a2f38; color: var(--text);
+  border: 1px solid #3a4049; border-radius: 6px; cursor: pointer;
+}
+.add-row button:disabled { opacity: 0.45; cursor: default; }
+
+.searches { list-style: none; padding: 0; margin: 0; }
+.searches li {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 4px; border-bottom: 1px solid var(--line); font-size: 13px;
+}
+.searches label { display: flex; align-items: center; gap: 8px; flex: 1; cursor: pointer; }
+.searches li.disabled span { color: var(--muted); text-decoration: line-through; }
+.truncated { font-size: 11px; }

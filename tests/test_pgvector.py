@@ -371,3 +371,46 @@ def test_a_full_valuation_produces_an_estimate_and_a_deal_score(pg_engine):
     assert result.deal_score > 0.4, "asking 200 against a ~415 estimate is a real discount"
     assert result.comp_count == 4
     assert 0.0 < result.confidence <= 1.0
+
+
+def test_model_key_is_an_exact_match_not_a_soft_one(pg_engine):
+    """Unlike every other spec filter, an unstated model key is EXCLUDED.
+
+    "Gigabyte 3060 Ti" with no "RTX" prefix stores model_key as NULL, and
+    keeping it would let a 3060 Ti comp a 3080 Ti. Measured: allowing NULL
+    gave 30 comps at 8.69x spread, exact matching gave 16 at 2.33x.
+    """
+    clear(pg_engine)
+    with Session(pg_engine) as session:
+        same = make_priced("same", "RTX 3080 Ti", 700.0, vector=unit_vector(1.0))
+        same.model_key = "rtx-3080-ti"
+        session.add(same)
+        other = make_priced("other-model", "RTX 3060 Ti", 250.0, vector=unit_vector(1.0, 0.01))
+        other.model_key = "rtx-3060-ti"
+        session.add(other)
+        unnamed = make_priced("no-model", "Gigabyte 3060 Ti", 220.0, vector=unit_vector(1.0, 0.01))
+        session.add(unnamed)  # model_key stays None
+        session.commit()
+
+    matches = find_similar_to_vector(unit_vector(1.0), k=10, db_engine=pg_engine,
+                                     model_key="rtx-3080-ti")
+
+    assert [m.listing.source_id for m in matches] == ["same"]
+
+
+def test_other_spec_filters_still_keep_unstated_rows(pg_engine):
+    """The contrast that makes the model_key rule a decision rather than an
+    inconsistency: 89% of titles state no completeness, so excluding unstated
+    rows there would discard most of the corpus."""
+    clear(pg_engine)
+    with Session(pg_engine) as session:
+        stated = make_priced("stated", "console only", 100.0, vector=unit_vector(1.0))
+        stated.completeness = "bare"
+        session.add(stated)
+        session.add(make_priced("unstated", "a console", 120.0, vector=unit_vector(1.0, 0.01)))
+        session.commit()
+
+    matches = find_similar_to_vector(unit_vector(1.0), k=10, db_engine=pg_engine,
+                                     completeness="bare")
+
+    assert {m.listing.source_id for m in matches} == {"stated", "unstated"}

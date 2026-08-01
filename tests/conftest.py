@@ -78,3 +78,23 @@ def pg_session(pg_engine):
     with Session(pg_engine) as session:
         yield session
         session.rollback()
+
+
+TEST_API_KEY = "test-key-not-a-real-secret"
+
+
+@pytest.fixture()
+def api_key(monkeypatch):
+    """Configure an API key for tests that exercise write endpoints.
+
+    Writes fail CLOSED when no key is set (docs/decisions/0017), so without
+    this fixture every POST/PATCH/DELETE returns 503. That is the intended
+    production behaviour, and tests/test_auth.py asserts it deliberately.
+    """
+    monkeypatch.setattr(settings, "api_key", TEST_API_KEY)
+    return TEST_API_KEY
+
+
+@pytest.fixture()
+def auth_headers(api_key):
+    return {"X-API-Key": api_key}
