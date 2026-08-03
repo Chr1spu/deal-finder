@@ -277,7 +277,7 @@ So the remaining 3b work is a three-attribute extraction (capacity, generation, 
 - Built the push path instead: `connectors/capture.py` (validation, normalization, upsert), `POST /capture` and `GET /capture/{id}/match`, and a Manifest V3 browser extension in `extension/` with per-site parsers for Depop and Facebook Marketplace. One capture path serves both, since it is the same problem twice.
 - Built `ml/match.py`, the cross-source bridge: `image_hash` exact match first (a reused stock photo is the same product, provably, for one indexed lookup), then CLIP k-NN against the eBay index. Returns candidates with a `PriceContext`.
 - Ran a full ingest to backfill the post-`0005` fields on the stale-code corpus: 64 searches in 326s, 1,924 new, 9,346 updated, 0 failed. The update-path fix from earlier today worked.
-- Started the pipeline: one `deal-finder` worker, one `deal-finder-ml` worker, one scheduler, plus the API. Verifying this turned out to need care: process listings are misleading because `uv run` wrappers show several processes per logical worker, and raw heartbeat age is misleading in the other direction because an idle RQ worker only refreshes its heartbeat each dequeue cycle, so 3-minute gaps are normal. A naive 120s staleness check reported two healthy workers as dead. The authoritative signal is the TTL on the worker's Redis key, which RQ expires at `worker_ttl`; both showed positive TTLs, one `busy` and one `idle` with completed jobs.
+- Started the pipeline: one `undercut` worker, one `undercut-ml` worker, one scheduler, plus the API. Verifying this turned out to need care: process listings are misleading because `uv run` wrappers show several processes per logical worker, and raw heartbeat age is misleading in the other direction because an idle RQ worker only refreshes its heartbeat each dequeue cycle, so 3-minute gaps are normal. A naive 120s staleness check reported two healthy workers as dead. The authoritative signal is the TTL on the worker's Redis key, which RQ expires at `worker_ttl`; both showed positive TTLs, one `busy` and one `idle` with completed jobs.
 - 208 tests passing (up from 175), mypy clean across 54 files.
 
 **Measured, finally:**
@@ -328,12 +328,12 @@ Prebuilt PCs are 3.9% `epid` **and** were the category where CLIP retrieval fail
 - The purpose is narrower than "a similarity feature": under ADR 0008 the eBay corpus is a **reference index**, and listings found on other sources are **queries against it**. `epid` is exact and free but is an eBay catalog id, so a foreign listing never carries one. Embeddings are the only available bridge, which is what justifies this stage at all.
 - Backfill and go-forward are one code path. `embed_pending()` selects `WHERE embedded_at IS NULL`, which is simultaneously the existing corpus and every row ingest lands from now on, so there is no separate one-off script to drift out of sync.
 - `embedded_at` is stamped on **every attempt**, success or failure. Keying the queue on `embedding IS NULL` instead would hand back the imageless listings and every dead image URL on every run, forever.
-- Added a second RQ queue, `deal-finder-ml`. The reason is capability, not throughput: RQ hands a worker whatever job is next, so on a shared queue the deliberately torch-free ingest worker would eventually be handed an embed job and die on `import torch`. Scheduler gained a third branch on `embed_interval_seconds`.
+- Added a second RQ queue, `undercut-ml`. The reason is capability, not throughput: RQ hands a worker whatever job is next, so on a shared queue the deliberately torch-free ingest worker would eventually be handed an embed job and die on `import torch`. Scheduler gained a third branch on `embed_interval_seconds`.
 - torch and `open_clip` are imported **inside functions**, never at module scope, so `systems/queue.py` can reference the job by name without dragging 3 GB of CUDA libraries into the scheduler, the API process and every test run. A test asserts the whole `ml` package imports with torch absent from `sys.modules`.
 - Images are fetched at eBay's `s-l500` CDN variant rather than the stored `s-l225`, by URL substitution. Costs no quota, since the CDN is not the Browse API. Non-eBay URLs pass through the substitution untouched.
 - **Fixed the ingest update path**, which was refreshing six fields while the model had grown to thirty-six. Anything added after stage 2 was captured on insert and never again, so a listing already in the table could never acquire a column added later. Extracted `_refresh_from_summary` so the field list lives in one place instead of being duplicated across the insert and update branches.
 - Rewrote `GET /listings`, which had no pagination and already serialized every column of all 10,496 rows. Added `ListingRead` (excludes `embedding` and `sale_signals`, exposes `total_cost` alongside `price`), plus `limit`/`offset` and `source`/`status` filters.
-- Moved the venv out of the OneDrive-synced folder to `C:\venvs\deal-finder` via `UV_PROJECT_ENVIRONMENT`, before installing torch. OneDrive does not read `.gitignore`, and the venv was about to go from 294 MB to ~3 GB. Repo dropped from ~389 MB to 95 MB on disk. The repo itself did not move, so git is unaffected.
+- Moved the venv out of the OneDrive-synced folder to `C:\venvs\undercut` via `UV_PROJECT_ENVIRONMENT`, before installing torch. OneDrive does not read `.gitignore`, and the venv was about to go from 294 MB to ~3 GB. Repo dropped from ~389 MB to 95 MB on disk. The repo itself did not move, so git is unaffected.
 - 175 tests passing (up from 136), mypy clean across 48 files.
 
 **Decided:**
@@ -747,7 +747,7 @@ The practical consequence for stage 3b: a foreign listing's title can query the 
 
 **Decided:**
 - Disappearance checking runs as a plain script for now instead of waiting on the stage-2 RQ scheduler, since the plan calls for starting it as early as possible so it has time to accumulate data.
-- Repo lives directly in this folder rather than in a nested `deal-finder/` subdirectory.
+- Repo lives directly in this folder rather than in a nested `undercut/` subdirectory.
 
 **Broke / debugged:**
 - N/A, first commit.

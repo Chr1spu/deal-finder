@@ -6,7 +6,7 @@
 // held in localStorage rather than bundled, so the repo never contains it.
 
 const BASE = "/api";
-const KEY_STORAGE = "dealFinderApiKey";
+const KEY_STORAGE = "undercutApiKey";
 
 export function getApiKey() {
   try {

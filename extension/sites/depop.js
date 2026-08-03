@@ -110,7 +110,7 @@
     return null;
   }
 
-  window.__dealFinderParse = function () {
+  window.__undercutParse = function () {
     const ld = jsonLd();
     const data = nextData();
     const product = data ? findProduct(data.props || data, 0) : null;

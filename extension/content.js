@@ -1,5 +1,5 @@
 // Shared content script. The per-site parser (sites/depop.js or
-// sites/facebook.js) runs first and installs window.__dealFinderParse; this
+// sites/facebook.js) runs first and installs window.__undercutParse; this
 // file handles everything site-agnostic: talking to the popup, posting to the
 // local API, and rendering the result as an overlay on the page.
 //
@@ -11,7 +11,7 @@
   "use strict";
 
   const API = "http://localhost:8000";
-  const OVERLAY_ID = "deal-finder-overlay";
+  const OVERLAY_ID = "undercut-overlay";
 
   function money(value) {
     return value === null || value === undefined ? "n/a" : "$" + Number(value).toFixed(2);
@@ -40,7 +40,7 @@
   function render(html) {
     overlay().innerHTML =
       '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">' +
-      '<strong style="font-size:13px">Deal Finder</strong>' +
+      '<strong style="font-size:13px">Undercut</strong>' +
       '<span data-close="1" style="cursor:pointer;opacity:.6;padding:0 4px">&times;</span>' +
       "</div>" + html;
   }
@@ -123,13 +123,13 @@
   }
 
   async function capture() {
-    if (typeof window.__dealFinderParse !== "function") {
+    if (typeof window.__undercutParse !== "function") {
       return render("<div>No parser loaded for this page.</div>");
     }
 
     let payload;
     try {
-      payload = window.__dealFinderParse();
+      payload = window.__undercutParse();
     } catch (e) {
       return render("<div>Page parse failed: " + escapeHtml(e.message) + "</div>");
     }
@@ -189,7 +189,7 @@
       }
     } catch (e) {
       render(
-        "<div>Could not reach the Deal Finder API at " + API + ".</div>" +
+        "<div>Could not reach the Undercut API at " + API + ".</div>" +
         '<div style="opacity:.6;font-size:11px;margin-top:6px">Start it with: ' +
         "uv run uvicorn api.main:app</div>"
       );

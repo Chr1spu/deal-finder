@@ -6,7 +6,7 @@ from api.routes.deals import router as deals_router
 from api.routes.listings import router as listings_router
 from api.routes.saved_searches import router as saved_searches_router
 
-app = FastAPI(title="Deal Finder API")
+app = FastAPI(title="Undercut API")
 
 # The browser extension posts captures from depop.com and facebook.com pages,
 # so those origins have to be allowed explicitly. Deliberately a fixed list

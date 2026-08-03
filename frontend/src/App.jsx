@@ -12,7 +12,7 @@ export default function App() {
   return (
     <div className="app">
       <header className="top">
-        <h1>Deal Finder</h1>
+        <h1>Undercut</h1>
         <nav>
           {TABS.map((t) => (
             <button key={t} className={tab === t ? "tab active" : "tab"} onClick={() => setTab(t)}>

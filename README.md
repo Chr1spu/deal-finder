@@ -1,4 +1,4 @@
-# Deal Finder
+# Undercut
 
 A secondhand-marketplace deal finder. Ingests listings, extracts image and text features, compares against a self-built history of comparable sold items, and scores how good a deal is.
 
@@ -28,8 +28,8 @@ The overlay shows what comparable eBay listings are **asking**, alongside the ca
    must never mean an open endpoint. See [docs/decisions/0017](docs/decisions/0017-api-key-auth.md).
 2. **Choose where the virtualenv lives, before installing anything.** If this repo sits in a cloud-synced folder (OneDrive, Dropbox), point uv somewhere else first, because the ML dependencies take the venv to roughly 3 GB and sync tools do not read `.gitignore`:
    ```
-   setx UV_PROJECT_ENVIRONMENT C:\venvs\deal-finder     # Windows, persists for future shells
-   export UV_PROJECT_ENVIRONMENT=~/.venvs/deal-finder   # macOS/Linux, add to your shell profile
+   setx UV_PROJECT_ENVIRONMENT C:\venvs\undercut     # Windows, persists for future shells
+   export UV_PROJECT_ENVIRONMENT=~/.venvs/undercut   # macOS/Linux, add to your shell profile
    ```
    The repo itself does not move, so git is unaffected.
 3. Install [uv](https://docs.astral.sh/uv/), then `uv sync` for the API, connectors and tests. Add `uv sync --group ml` only on the machine that runs embeddings (installs PyTorch with CUDA, see `pyproject.toml`).
@@ -73,8 +73,8 @@ rollup with no native module.
 Two queues, two workers, and they are not interchangeable. RQ hands a worker whatever job is next, so a single shared queue would eventually hand the deliberately torch-free ingest worker a GPU job and kill it on `import torch`.
 
 ```
-rq worker deal-finder     --worker-class systems.queue.WindowsWorker   # ingest + disappearance check
-rq worker deal-finder-ml  --worker-class systems.queue.WindowsWorker   # embeddings (needs --group ml)
+rq worker undercut        --worker-class systems.queue.WindowsWorker   # ingest + disappearance check
+rq worker undercut-ml     --worker-class systems.queue.WindowsWorker   # embeddings (needs --group ml)
 uv run python -m systems.scheduler                                     # enqueues all three job types
 ```
 

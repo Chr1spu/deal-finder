@@ -1,4 +1,4 @@
-# Deal Finder
+# Undercut
 
 A secondhand-marketplace deal finder: ingests listings from eBay (and later Depop / Facebook Marketplace), extracts image and text features, compares each listing against a self-built history of comparable sold items, and scores how good a deal it is. Surfaced through a live dashboard with saved searches and alerts.
 
@@ -78,7 +78,7 @@ Reopened as stage 2.5 on 2026-07-12: stage 2 was code-complete but had stopped w
 - [x] NLP extraction, variant half: lots, defects, completeness (`ml/extract.py`, ADR `0012`)
 - [x] NLP extraction, spec half: capacity / generation / form factor / model key, plus accessory exclusion (`ml/extract.py`, ADR `0013`)
 
-Stage 3a done 2026-07-25: `ml/embeddings.py`, `ml/embed_listings.py`, `ml/similar.py`, migration `0010` (pgvector, nullable `vector(512)`), a separate `deal-finder-ml` RQ queue so the torch-free ingest worker can never be handed a GPU job, and `ListingRead` pagination on `GET /listings`. See `docs/decisions/0009-clip-embeddings-pgvector.md`.
+Stage 3a done 2026-07-25: `ml/embeddings.py`, `ml/embed_listings.py`, `ml/similar.py`, migration `0010` (pgvector, nullable `vector(512)`), a separate `undercut-ml` RQ queue so the torch-free ingest worker can never be handed a GPU job, and `ListingRead` pagination on `GET /listings`. See `docs/decisions/0009-clip-embeddings-pgvector.md`.
 
 The `epid` question that was posted here as a blocker is **resolved, by argument rather than by measurement.** It asked whether high `epid` coverage would make this stage redundant, since two listings sharing one are definitively the same product. ADR 0008 answers it: `epid` is an eBay *catalog* id, so a Depop or Facebook listing has none and never will. It makes eBay-internal comps sharper and does nothing for the cross-source bridge, which is the actual product. Coverage is still worth measuring for stage 4's benefit, and cannot change whether stage 3 gets built.
 

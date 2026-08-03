@@ -1,6 +1,6 @@
 """RQ job queue setup. Actual job logic lives in connectors/ (ingest_all,
 check_all_sources); this module just knows how to enqueue them. Running a
-worker is `rq worker deal-finder` (via the redis connection configured
+worker is `rq worker undercut` (via the redis connection configured
 here), no custom worker code needed.
 """
 
@@ -22,7 +22,7 @@ from connectors.ingest_ebay import ingest_all
 from ml.embed_listings import embed_pending
 from systems.deal_scan import run_deal_scan
 
-QUEUE_NAME = "deal-finder"
+QUEUE_NAME = "undercut"
 
 # A second queue for embedding work, and the reason is capability rather than
 # throughput. RQ hands a worker whatever job is next on the queues it watches,
@@ -30,14 +30,14 @@ QUEUE_NAME = "deal-finder"
 # deliberately) would sooner or later be handed an embed job and die on
 # `import torch`. Splitting the queues is what lets one worker exist without
 # a 3 GB dependency. See docs/decisions/0009-clip-embeddings-pgvector.md.
-ML_QUEUE_NAME = "deal-finder-ml"
+ML_QUEUE_NAME = "undercut-ml"
 
 
 class WindowsWorker(SimpleWorker):
     """rq's default Worker forks (os.fork) and even SimpleWorker's job-timeout
     enforcement uses SIGALRM, neither of which exist on Windows. TimerDeathPenalty
     uses threading.Timer instead, which works cross-platform. Use this for local
-    dev on Windows: `rq worker deal-finder --worker-class systems.queue.WindowsWorker`.
+    dev on Windows: `rq worker undercut --worker-class systems.queue.WindowsWorker`.
     Plain `rq worker` is fine once this runs inside a Linux container (stage 7)."""
 
     # rq types this as UnixSignalDeathPenalty on the base class, which is

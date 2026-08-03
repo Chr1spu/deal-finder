@@ -79,7 +79,7 @@
     return [...new Set(urls)].slice(0, 6);
   }
 
-  window.__dealFinderParse = function () {
+  window.__undercutParse = function () {
     const listing = fromHydration();
 
     const heading = document.querySelector('h1, [role="main"] span[dir="auto"]');

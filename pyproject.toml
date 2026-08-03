@@ -1,5 +1,5 @@
 [project]
-name = "deal-finder"
+name = "undercut"
 version = "0.1.0"
 description = "Secondhand-marketplace deal finder that scans listings and scores them against a self-built history of comparable sold items."
 requires-python = ">=3.12,<3.13"

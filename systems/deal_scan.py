@@ -27,9 +27,9 @@ from ml.valuation import find_deals
 
 logger = logging.getLogger(__name__)
 
-DEALS_KEY = "deal-finder:deals"
-SCAN_AT_KEY = "deal-finder:deals:scanned_at"
-ALERTED_KEY = "deal-finder:deals:alerted"
+DEALS_KEY = "undercut:deals"
+SCAN_AT_KEY = "undercut:deals:scanned_at"
+ALERTED_KEY = "undercut:deals:alerted"
 
 # Twice the scan interval, so a feed is never empty just because a scan is
 # mid-flight, but a scan that stops running does eventually go quiet rather
@@ -121,7 +121,7 @@ def notify_discord(deals: list, webhook_url: str | None = None) -> bool:
 def run_deal_scan(scan_limit: int | None = None, alert: bool = True) -> int:
     """Scan for deals, cache the results, and alert on new ones.
 
-    Returns how many deals were found. Runs on the `deal-finder` queue: it
+    Returns how many deals were found. Runs on the `undercut` queue: it
     needs no torch, only Postgres and pgvector.
     """
     from api.routes.deals import _to_deal_read
