@@ -251,6 +251,98 @@ def test_capacity_falls_back_to_aspects():
     assert variant.signals.get("capacity_from_aspects") == "Storage Capacity"
 
 
+# --------------------------------------------------------------- memory kits
+
+
+@pytest.mark.parametrize(
+    "title,expected",
+    [
+        ("Corsair Vengeance 2x16GB DDR5 6000MHz", 32),
+        ("G.Skill Trident Z5 DDR5 4 x 8GB", 32),
+        ("Crucial 16GB x 2 DDR4 SODIMM Laptop Memory", 32),
+        ("Kingston Fury 2 x 32GB DDR5 RAM", 64),
+        # The pair that motivated the rule: one product, two spellings, and
+        # before this they landed in different capacity buckets (32 and 16).
+        ("Corsair Vengeance 32GB (2x16GB) DDR5 6000MHz", 32),
+        ("Corsair Vengeance 2x16GB DDR5 6000MHz CL30 memory", 32),
+    ],
+)
+def test_a_kit_is_priced_as_its_total_capacity(title, expected):
+    """A 2x16GB kit is 32GB of memory. Reading it as 16 put it among single
+    sticks at half the price, which is the suspected source of DDR5 desktop
+    memory keeping a 19.1x spread after every other filter."""
+    assert extract_variant(title).capacity_gb == expected
+
+
+def test_a_kit_is_not_a_lot():
+    """The distinction the whole rule rests on. A lot is several items that
+    could be sold separately and is excluded from comps; a matched kit is one
+    product, and stays a usable comparable."""
+    variant = extract_variant("Corsair Vengeance 2x16GB DDR5 6000MHz")
+
+    assert variant.is_lot is False
+    assert variant.usable_as_comp is True
+    assert variant.signals["kit_modules"] == 2
+    assert variant.signals["kit_total_gb"] == 32
+
+
+def test_module_count_is_recorded_for_titles_that_state_a_total():
+    """Both spellings agree on capacity now, so the module count is what still
+    distinguishes a 2x16GB kit from a single 32GB stick."""
+    variant = extract_variant("Corsair Vengeance 32GB (2x16GB) DDR5")
+
+    assert variant.capacity_gb == 32
+    assert variant.signals["kit_modules"] == 2
+
+
+def test_a_single_module_is_not_a_kit():
+    """"1x8GB" is one stick written oddly, the same call MIN_LOT_SIZE makes.
+
+    Its capacity stays unstated, because _CAPACITY_RE needs a word boundary
+    before the number and "x8GB" has none. That predates this rule and is left
+    alone deliberately: widening the capacity pattern is a corpus-wide change
+    and this one is not.
+    """
+    variant = extract_variant("Samsung 1x8GB DDR4 2666 DIMM")
+
+    assert "kit_modules" not in variant.signals
+    assert variant.capacity_gb is None
+
+
+def test_a_plainly_written_single_stick_is_unaffected():
+    variant = extract_variant("Samsung 8GB DDR4 2666 DIMM")
+
+    assert variant.capacity_gb == 8
+    assert "kit_modules" not in variant.signals
+
+
+def test_two_graphics_cards_are_not_a_memory_kit():
+    """The gate that makes the rule safe. "24GB x 2" is two cards, and
+    totalling it to 48 would file the listing under a capacity no card has,
+    leaving it with no comps at all rather than merely mispriced."""
+    variant = extract_variant("MSI RTX 3090 24GB x 2 SLI pair")
+
+    assert variant.capacity_gb == 24
+    assert "kit_modules" not in variant.signals
+
+
+@pytest.mark.parametrize(
+    "title,expected",
+    [
+        # The same titles that killed the generic "Nx" quantity forms. A
+        # capacity unit right after the second number is what separates a kit
+        # from a PCIe lane count, a product line and a CPU model.
+        ("Dell NVIDIA GeForce RTX 3080 10GB GDDR6X PCIe 4.0 x16", 10),
+        ("Crucial P310 4TB Gen4 x4 M.2 2280 NVMe SSD", 4096),
+        ("Micron 2280mm 2400 1TB M.2 NVMe Gen 4.0 x 4 SSD", 1024),
+        ("MSI NVIDIA GeForce RTX 3080 VENTUS 3X PLUS 10GB GDDR6X", 10),
+        ("PowerColor Hellhound AMD Radeon RX 7900 XTX OC 24GB GDDR6", 24),
+    ],
+)
+def test_lane_counts_and_model_names_are_not_kits(title, expected):
+    assert extract_variant(title).capacity_gb == expected
+
+
 @pytest.mark.parametrize(
     "title,expected",
     [
@@ -393,3 +485,106 @@ def test_generic_signals_transfer_to_unfamiliar_categories():
     assert extract_variant("Dyson V11 Vacuum - no battery, unit only").completeness == BARE
     assert extract_variant("Fender Stratocaster - cracked neck for parts").has_defect is True
     assert extract_variant("Lot of 12 Vintage Vinyl Records").is_lot is True
+
+# --------------------------------------- stripped boards and missing cores
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        # All real titles, all led the deal feed at 96-97% discounts against
+        # complete cards. A bare board names the model it came from, so it
+        # matches on model string and photo alike and neither epid nor CLIP
+        # rejects it. The vocabulary had "pcb only" but sellers write "PCB
+        # Board For X" far more often.
+        "PCB Board For ZOTAC GAMING GeForce RTX 4090 Trinity",
+        "PCB For  TUF RTX4080SUPER 16G",
+        "PCB Board For Asus Tuf RTX 4080 GAMING No Chip",
+    ],
+)
+def test_stripped_boards_are_accessories(title):
+    variant = extract_variant(title, None, "Graphics/Video Cards")
+    assert variant.is_accessory is True
+    assert variant.usable_as_comp is False
+
+
+def test_a_component_missing_its_core_is_a_defect():
+    """The other word order. The defect vocabulary reads "MISSING CORE";
+    sellers equally write "GPU AND MEMORY MISSING", which matched nothing and
+    ranked a stripped RTX 4090 at $74.97 against a $2,719 estimate."""
+    variant = extract_variant(
+        "GPU AND MEMORY MISSING - MSI RTX 4090 Gaming X Slim", None, "Graphics/Video Cards"
+    )
+    assert variant.has_defect is True
+    assert variant.usable_as_comp is False
+
+
+@pytest.mark.parametrize(
+    "title,category",
+    [
+        # A MACHINE missing a component is a working reduced configuration,
+        # not damage. Reading these as defects flagged real $1,800-$4,900
+        # listings, which is the whole reason the rule is category-gated.
+        ("HP Z8 G4 Workstation Xeon 64GB No GPU", "Desktops & All-In-Ones"),
+        ("Dell Precision 7920 Tower - NO GPU, NO OS", "Desktops & All-In-Ones"),
+        # And a real card that merely mentions a board or a box.
+        ("MSI RTX 4090 Gaming X Trio with original box and PCB shroud", "Graphics/Video Cards"),
+        ("EVGA RTX 3080 FTW3 Ultra with upgraded PCB thermal pads", "Graphics/Video Cards"),
+        ("ASUS ROG Strix RTX 4090 OC 24GB Graphics Card", "Graphics/Video Cards"),
+    ],
+)
+def test_real_items_survive_the_stripped_board_rules(title, category):
+    variant = extract_variant(title, None, category)
+    assert variant.usable_as_comp is True, variant.signals
+
+# ------------------------- vocabulary the deal feed found, one gap at a time
+
+GPU_CATEGORY = "Graphics/Video Cards"
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        # Every one led the deal feed. The vocabulary already covered the same
+        # claim in a different wording, which is the recurring shape of these
+        # misses: sellers say one thing several ways and the regex knows one.
+        # "not working" was covered, the adjective "Non-Functional" was not.
+        "ASUS TUF Gaming OC GeForce RTX 4080 Super 16GB - GPU - Non-Functional Device",
+        "RTX 5090 PALIT GameRock with box, PCB, RGB REMOTE & App control(non-functional!)",
+        "NONFUNCTIONAL - BX8071514900K CoreTM i914900K Gaming Desktop Processor",
+        # "spares or repair" was covered, "parts or repair" was not.
+        "MSI GeForce RTX 3090 SUPRIM X 24G Graphics Card Only *PARTS OR REPAIR*",
+        "NVIDIA GeForce RTX 3080 Graphics Card - VRAM Issue / Parts or Repair",
+    ],
+)
+def test_defects_the_feed_surfaced(title):
+    variant = extract_variant(title, None, GPU_CATEGORY)
+    assert variant.has_defect is True
+    assert variant.usable_as_comp is False
+
+
+def test_a_trim_piece_is_an_accessory():
+    """$28.50 against real cards. A part number plus a compatibility list is
+    never the product, but the discriminator that generalises is the noun."""
+    variant = extract_variant(
+        "DH0011 For RX6600XT RX6700XT Magic Eagle RX6800 gaming graphics card bezel blank",
+        None,
+        GPU_CATEGORY,
+    )
+    assert variant.is_accessory is True
+    assert variant.usable_as_comp is False
+
+
+@pytest.mark.parametrize(
+    "title,category",
+    [
+        ("MSI RTX 4090 Gaming X Trio fully functional, tested", GPU_CATEGORY),
+        ("EVGA RTX 3080 FTW3 with RGB bezel and original box", GPU_CATEGORY),
+        ("Apple iPhone 15 Pro Max 256GB Unlocked", "Cell Phones & Smartphones"),
+    ],
+)
+def test_the_new_vocabulary_does_not_catch_real_items(title, category):
+    """"fully functional" contains "functional", and a real card can mention
+    its own bezel. Both were checked against the whole corpus, not just here:
+    11 listings changed, all of them genuinely broken or parts."""
+    assert extract_variant(title, None, category).usable_as_comp is True

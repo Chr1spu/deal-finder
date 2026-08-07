@@ -46,8 +46,14 @@ class WindowsWorker(SimpleWorker):
     death_penalty_class = TimerDeathPenalty  # type: ignore[assignment]
 
 
+def get_redis() -> Redis:
+    """The one place the Redis URL is read. Shared with the scheduler, which
+    writes its heartbeat to the same instance the queues live on."""
+    return Redis.from_url(settings.redis_url)
+
+
 def get_queue(name: str = QUEUE_NAME) -> Queue:
-    return Queue(name, connection=Redis.from_url(settings.redis_url))
+    return Queue(name, connection=get_redis())
 
 
 def get_ml_queue() -> Queue:

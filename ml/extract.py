@@ -83,6 +83,21 @@ _DEFECT_RE = re.compile(
     r"\bfor\s+parts\b|\bparts\s+only\b|\bnot\s+work\w*\b|\bdoes\s*n[o']?t\s+work\b|"
     r"\bas[\s-]is\b|\bbroken\b|\bcracked?\b|\bchipped\b|\bdamaged?\b|\bfaulty\b|"
     r"\bdefect\w*\b|\bfor\s+repair\b|\bneeds?\s+repair\b|\bspares?\s+or\s+repair\b|"
+    # "PARTS OR REPAIR" is the same claim as "spares or repair", which was
+    # already here, and it ranked a $310 RTX 3090 as a 78% discount. Two
+    # sellers, two vocabularies, one meaning.
+    r"\bparts\s+or\s+repair\b|\bparts\s*/\s*repair\b|"
+    # "PLEASE READ PARTS" and "Graphics Card PARTS READ". A bare "parts" is
+    # NOT enough on its own: a corpus probe found it on 32 listings including
+    # a $2,000 "CUSTOM GAMING PC ... Power CORD" and a $600 "PC Parts Bundle",
+    # both real. Pairing it with READ is the discriminator, and the same probe
+    # killed a trailing-"box" rule that would have excluded a $4,750 RTX 5090
+    # Founders sold "with Original Box".
+    r"\bparts\s+read\b|\bread\s+parts\b|"
+    # "Non-Functional Device" and "(non-functional!)" both led the feed at
+    # 94-95%. The vocabulary covered "not working" and "does not work" but
+    # never the adjective form.
+    r"\bnon[-\s]?functional\b|\bnot\s+functional\b|"
     r"\bunteste\w+\b|\bdead\b|\bwon'?t\s+(?:power|turn|boot)\b|"
     # Found on real RTX 3090 listings sitting at half price inside an
     # otherwise-clean model group: hardware that is intact but does not work.
@@ -117,6 +132,29 @@ _MISSING_COMPONENT_RE = re.compile(
     r"storage|os|battery|charger|psu|power\s*supply)\b",
     re.IGNORECASE,
 )
+
+# The component/machine split again, in the other word order. The defect
+# vocabulary above reads "MISSING CORE"; sellers equally write "GPU AND MEMORY
+# MISSING", which matched nothing and ranked a stripped RTX 4090 at $74.97
+# against a $2,719 estimate. Only consulted for component categories, because
+# the discriminator is unchanged: a *component* missing its core is broken,
+# a *machine* missing one is a working reduced configuration (`bare`).
+_MISSING_SUFFIX_RE = re.compile(
+    r"\b(?:gpu|graphics?\s*card|core|vram|die|chip|memory|mem|board|pcb)\b"
+    r"(?:\s*(?:,|and|&|\+)\s*\w+)*\s+(?:is\s+|are\s+)?missing\b",
+    re.IGNORECASE,
+)
+# eBay's taxonomy for things that are themselves a part of a machine.
+_COMPONENT_CATEGORY_TOKENS = (
+    "graphics", "video card", "gpu", "processor", "cpu",
+    "memory", "ram", "motherboard",
+)
+
+
+def _is_component_category(category: str | None) -> bool:
+    lowered = (category or "").lower()
+    return any(token in lowered for token in _COMPONENT_CATEGORY_TOKENS)
+
 
 # A seller writing READ / READ DESCRIPTION is flagging a caveat without saying
 # what. Recorded as a signal, deliberately NOT treated as a defect: it is a
@@ -186,7 +224,12 @@ _ACCESSORY_NOUN = (
     r"backplate|back\s?plate|heat\s?sink|cooler|shroud|bracket|water\s?block|"
     r"nvlink|bridge|riser|mount|manual|guide|sticker|decal|screw|thermal\s?pad|"
     r"cooling\s?fan|fan\s?assembly|replacement\s+part|empty\s+box|box\s+only|"
-    r"paste|standoff|adapter\s+plate|dust\s+cover|anti[\s-]?sag"
+    r"paste|standoff|adapter\s+plate|dust\s+cover|anti[\s-]?sag|"
+    # "DH0011 For RX6600XT RX6700XT Magic Eagle RX6800 gaming graphics card
+    # bezel blank" is a $28 trim piece that comped against real cards. Gated
+    # by _FOR_RE like the rest of this list, so a card that merely mentions
+    # its bezel is untouched.
+    r"bezel|face\s?plate|trim\s+piece"
 )
 _ACCESSORY_NOUN_RE = re.compile(rf"\b(?:{_ACCESSORY_NOUN})\b", re.IGNORECASE)
 
@@ -267,7 +310,12 @@ _NOT_THE_PRODUCT_RE = re.compile(
 # the start is what separates them, and it is more precise than adding these
 # to the general vocabulary and hoping the "for" gate holds.
 _SUBJECT_ACCESSORY_RE = re.compile(
-    r"^\W*(?:case|box|cover|skin|sleeve|bag|shell|stand|holder|dock)\b", re.IGNORECASE
+    r"^\W*(?:case|box|cover|skin|sleeve|bag|shell|stand|holder|dock"
+    # "PCB Board For ZOTAC RTX 4090" and "PCB For TUF RTX4080SUPER" led the
+    # feed at 96-97% discounts. A stripped board names the model it came from,
+    # so it matches on both model string and photo. Anchored at the start and
+    # still gated by _FOR_RE, so "card with upgraded PCB" is untouched.
+    r"|pcb)\b", re.IGNORECASE
 )
 
 # --- specs ------------------------------------------------------------------
@@ -280,6 +328,30 @@ _CAPACITY_RE = re.compile(r"\b(\d{1,5})\s*(GB|TB)\b", re.IGNORECASE)
 # legitimately has 100TB, and "PC5-38400" style codes are excluded by requiring
 # the GB/TB suffix anyway.
 MAX_PLAUSIBLE_CAPACITY_GB = 100_000
+
+# A memory kit: "2x16GB", "4 x 8GB", "16GB x 2".
+#
+# This is the one "Nx" quantity form that survives this corpus, and the reason
+# is the capacity unit. _LOT_COUNT_RE deliberately refuses every generic Nx
+# pattern because an x beside a number in PC hardware is almost never a count:
+# those matched 14.1% of titles, nearly all falsely ("RX 6700 XT", "PCIe 4.0
+# x16", "Ryzen 5 7600X", "VENTUS 3X PLUS"). Requiring GB or TB immediately
+# after the second number excludes all of them, because none is followed by a
+# capacity unit.
+#
+# A kit is NOT a lot, and keeping the two apart is the whole point. "Lot of 2"
+# is two items that happen to be sold together and could be sold separately;
+# "2x16GB" is one matched kit, and a buyer who splits it no longer has what
+# was advertised. So this feeds capacity, not lot_size: a kit stays a usable
+# comp, priced by what it actually contains.
+_KIT_RE = re.compile(
+    r"\b(\d{1,2})\s*[xX]\s*(\d{1,5})\s*(GB|TB)\b"
+    r"|\b(\d{1,5})\s*(GB|TB)\s*[xX]\s*(\d{1,2})\b",
+    re.IGNORECASE,
+)
+# Consumer boards top out at four slots and workstations at eight. A larger
+# number in front of an x is a model or a lot, not a module count.
+MAX_KIT_MODULES = 8
 
 # Drives write it several ways: "PCIe 4.0", "PCIe Gen 4", and bare "Gen 3.0".
 # The bare form is safe because "13th Gen Intel" puts a word after Gen, not a
@@ -497,9 +569,50 @@ def _is_accessory(title: str, category: str | None = None) -> tuple[bool, str | 
     return False, None
 
 
+def _kit_capacities(title: str) -> list[tuple[int, int]]:
+    """(module count, kit total in GB) for every kit expression in the title.
+
+    Returns an empty list for a single stick, which is the common case.
+
+    Gated on memory/storage context for the same reason _form_factor is, and
+    here the gate is load-bearing rather than tidy: "RTX 3090 24GB x 2" is two
+    graphics cards, not a 48GB kit, and reading it as one would file the
+    listing under a capacity no card has, quietly leaving it with no comps at
+    all. Only things sold as matched modules get totalled.
+    """
+    if not _COMPONENT_CONTEXT_RE.search(title):
+        return []
+
+    kits: list[tuple[int, int]] = []
+    for match in _KIT_RE.finditer(title):
+        if match.group(1):
+            count_raw, size_raw, unit = match.group(1), match.group(2), match.group(3)
+        else:
+            count_raw, size_raw, unit = match.group(6), match.group(4), match.group(5)
+        count, per_module = int(count_raw), int(size_raw)
+        if unit.upper() == "TB":
+            per_module *= 1024
+        # "1x8GB" is a single stick written oddly, not a kit, and MIN_LOT_SIZE
+        # draws the same line for the same reason.
+        if not MIN_LOT_SIZE <= count <= MAX_KIT_MODULES:
+            continue
+        total = count * per_module
+        if 0 < total <= MAX_PLAUSIBLE_CAPACITY_GB:
+            kits.append((count, total))
+    return kits
+
+
 def _capacity_gb(title: str) -> int | None:
-    """Largest plausible capacity in the title, normalized to GB."""
+    """Largest plausible capacity in the title, normalized to GB.
+
+    A kit counts as its total. "2x16GB" is 32GB of memory, and reading it as
+    16 put one product in two buckets depending only on whether the seller
+    also wrote the total out: "32GB (2x16GB)" already read 32, while the same
+    kit listed as "2x16GB" landed among single 16GB sticks at half the price.
+    """
     best: int | None = None
+    for _, total in _kit_capacities(title):
+        best = total if best is None else max(best, total)
     for match in _CAPACITY_RE.finditer(title):
         try:
             value = int(match.group(1))
@@ -689,6 +802,9 @@ def extract_variant(
     signals.update(completeness_signals)
 
     defect = _DEFECT_RE.search(title)
+    if defect is None and _is_component_category(category):
+        # See _MISSING_SUFFIX_RE: only a component can be missing its core.
+        defect = _MISSING_SUFFIX_RE.search(title)
     if defect:
         signals["defect_match"] = defect.group(0).strip()
 
@@ -725,6 +841,18 @@ def extract_variant(
                     break
     if capacity is not None:
         signals["capacity_gb"] = capacity
+
+    # Recorded, not filtered on. How many modules make up a stated capacity is
+    # a quantity *within* one listing, which lot_size cannot express, and it is
+    # the remaining suspect for DDR5's residual price spread (a single 32GB
+    # stick and a 2x16GB kit are not quite the same thing at the same total).
+    # Whether that difference is worth a comp filter needs measuring on the
+    # corpus first; until then this makes the population visible.
+    kits = _kit_capacities(title)
+    if kits:
+        modules, total = max(kits, key=lambda kit: kit[1])
+        signals["kit_modules"] = modules
+        signals["kit_total_gb"] = total
 
     generation = _generation(title)
     if generation:

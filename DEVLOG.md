@@ -1,5 +1,256 @@
 # Devlog
 
+## 2026-08-07 - The capture path could not have matched anything, and a kit was not a capacity
+
+**The browser extension would have returned "no match" for every listing it
+ever captured, and the cause was three lines away from the feature it broke.**
+`connectors/capture.py` stored a captured listing's brand in `category`
+(`category=captured.brand`), and `ml/similar.py` filters candidates on
+`category` with `==`, deliberately hard, with no unstated escape hatch, because
+on eBay that column is always populated. So a Depop capture carrying
+`brand="Nike"` looked for eBay listings whose category is literally "Nike",
+found none, and reported no candidates. Not an error, not a log line: a match
+with an empty candidate list is the same shape as "not embedded yet".
+
+Both halves shipped in the same commit back on 2026-07-25, which is why nothing
+ever caught it. The hard category filter was added for a good reason (a $1,500
+prebuilt PC was entering comp sets for graphics cards, since CLIP matched two
+black boxes with RGB and the PC's title named no GPU), and it is correct for
+eBay-to-eBay comps. It is only wrong against a row that has no eBay category at
+all, which is every captured row by definition. `category` is now left null on
+captures, which is how this schema says "unstated"; brand still travels in
+`aspects`, where the matcher can read it without gating on it. The same brand
+was also being passed as `extract_variant`'s category argument, where it can
+only misfire: "Snap-on Tools" contains an accessory-category token.
+
+`tests/test_pgvector.py` now drives the whole cross-source path through real
+k-NN, from `save_capture` to `match_listing`, and asserts the candidate comes
+back. Restoring the old line fails it, which was checked rather than assumed.
+
+**The popup and the manifest disagreed about which pages are supported.** The
+popup's regex accepted `web.facebook.com` and a bare `depop.com`; the manifest
+injects content scripts into neither. On those pages the button enabled itself,
+`sendMessage` found no receiver, and the popup told the user to reload the page,
+forever. Same failure shape as the queue-name literal from 2026-08-07: a second
+copy of a fact drifting from the first. The popup now derives its list from
+`chrome.runtime.getManifest()`, so there is one copy.
+
+**A memory kit had no capacity at all, which is worse than having the wrong
+one.** `0013` closed with DDR5 desktop memory holding a 19.1x spread after every
+filter, and named the suspect as single sticks against multi-stick kits. The
+mechanism turns out to be the capacity regex's leading word boundary:
+`\b(\d{1,5})\s*(GB|TB)\b` cannot match the "16GB" inside "2x16GB", because
+there is no word boundary between `x` and `1`. Verified directly:
+
+| title | capacity before |
+|---|---|
+| `Corsair Vengeance 2x16GB DDR5 6000MHz` | none |
+| `Corsair 16GB x 2 DDR4 SODIMM` | 16 |
+| `G.Skill DDR5 4 x 8GB` | 8 |
+
+The first row is the damaging one. Capacity is a *soft* filter that keeps
+unstated rows, by design, since 89% of titles state nothing, so a kit written
+`2x16GB` was eligible as a comp for every capacity at once, 8GB and 128GB
+alike. The same product written `32GB (2x16GB)` already read 32 and behaved.
+Identical items, different buckets, decided by how the seller typed the title.
+
+`_KIT_RE` now matches a quantity only when a capacity unit follows immediately
+(`2x16GB`, `4 x 8GB`, `16GB x 2`), and `_capacity_gb` takes the kit total. That
+narrowness is the entire safety argument: the generic "Nx" forms were measured
+at 14.1% of the corpus and almost entirely false ("PCIe 4.0 x16", "VENTUS 3X
+PLUS", "Ryzen 5 7600X"), and not one of them is followed by GB or TB. The rule
+is gated on memory/storage context as well, and that gate is load-bearing:
+"RTX 3090 24GB x 2" is two graphics cards, and totalling it to 48GB would file
+the listing under a capacity no card has, leaving it with no comps at all
+rather than merely bad ones.
+
+**A kit is not a lot, and that is the distinction `0013` asked for.** A lot is
+several items that could be sold separately, so it is excluded from comps
+entirely. A matched kit is one product that cannot be split without becoming
+something else, so it stays a usable comp and its quantity feeds *capacity*
+instead. That turned out to need no new column: for memory, the quantity is
+already denominated in the units capacity is measured in. `kit_modules` and
+`kit_total_gb` go into `variant_signals` so the population is visible before
+anyone decides whether it deserves a filter. See `0018`.
+
+**What is not done, and deliberately not claimed.** The corpus-wide validation
+this project requires before trusting an extraction rule has not been run,
+because the database lives on the other machine. `ml/measure_kit_rule.py`
+produces exactly that number: change rate, affected categories, a sample of
+changed titles, and DDR5 spread before and after. Expected shape is low single
+digits; double digits means the rule is catching something other than kits and
+should come back out, the same way the Nx forms did.
+
+**The `model_key` gap in `CLAUDE.md`'s known-gaps list was already fixed.** It
+said comps still admit NULL model keys so a 3060 Ti can comp a 3080 Ti. That
+became an exact match on 2026-08-01, with `test_model_key_is_an_exact_match_not_a_soft_one`
+covering that exact scenario. The line was stale, not the code. The residual
+case it does *not* cover is the mirror image: a query listing whose own title
+never named a model is unkeyed, so keyed candidates are still admitted to its
+comp set. Whether that matters needs the corpus to answer and is recorded
+rather than guessed at.
+
+**Environment note.** The repo is reachable from the Mac through the OneDrive
+sync, but the in-repo `.venv` is the stale Windows one and unusable there. A
+throwaway macOS environment outside the repo runs the whole suite, including
+the pgvector tests, against a scratch Postgres 17 on port 5433. Those 22 tests
+skip rather than fail without a database, which is the right default and also
+why they were invisible until a database existed.
+
+402 tests passing (up from 383), mypy clean across 35 source files.
+
+## 2026-08-07 - Workers listening to a queue nothing published to
+
+**Intake was dead for about thirteen hours, and both halves of the system
+thought they were fine.** The scheduler enqueued `ingest_all` at 12:11 and it
+was still sitting there unprocessed the next morning. No error anywhere: not in
+the failed-job registry, not in a worker log, not in the process list.
+
+**Cause: the workers were listening on the wrong queue, and I put them there.**
+The queues are named from `QUEUE_NAME` in `systems/queue.py`, which the project
+rename changed from `deal-finder` to `undercut`. When the workers were
+restarted the day before, the command line was copied off the *old* running
+processes, which predated that rename. So the scheduler published to `undercut`
+while the workers subscribed to `deal-finder`.
+
+Nothing about that combination is an error condition. A worker with no jobs is
+a healthy idle worker, and it says so every thirteen minutes: `Cleaning
+registries for queue: deal-finder`. A queue with no consumers is a healthy
+queue. RQ has no reason to complain, and did not. Copying a working command
+line off a running process is normally the *safe* move, which is what made it
+worth writing down: the command line was a snapshot of an older truth, and
+literals in a launch command silently outlive the code that agrees with them.
+
+The worker shim now derives its queue name by importing `QUEUE_NAME` and
+`ML_QUEUE_NAME` rather than accepting one, so it cannot disagree with the code.
+
+**The scheduler had no error handling and no output at all.** Separate from the
+queue bug, and worse in the general case: `run_forever` called four enqueue
+functions bare in a `while True`, so any exception from any of them ended all
+scheduling permanently. It also logged nothing whatsoever, which is why the
+first investigation went looking for a crashed process and found a healthy one.
+Rewritten:
+
+- each enqueue is isolated, so one failure cannot stop the other three
+- failures log a traceback and count consecutively, never swallowed silently
+- a failed task does not advance `last_run`, so it retries in 30 seconds rather
+  than waiting out a two-hour interval
+- a skip (an identical job already queued) is logged too, because a task that
+  skips every cycle means a job is stuck rather than that all is well
+- a heartbeat goes to Redis with a TTL, so liveness is a question with an
+  answer
+
+`systems/scheduler_health.py` reads that heartbeat. It exists because every
+other way of asking this question has now given a wrong answer at least once:
+process names lie (`uv run` wrappers, and a 48-hour-old duplicate from a stale
+venv), a resident process is not a running loop, and missing rows in Postgres
+is a lagging indicator that has found the last three outages hours late.
+
+`tests/test_scheduler_isolation.py` drives `run_forever` for a bounded number
+of polls by making `time.sleep` raise, and asserts the outage directly: one
+enqueue raising must not stop the other three.
+
+**And the first full run after recovery deadlocked.** `embed_pending` lost a
+480-row chunk to `deadlock detected`: it and `ingest_all` write the same
+`listing` rows, and the embedding job held its session open across the image
+fetches and the GPU pass, so it sat on row locks for minutes at a time. Two
+changes: the session is now closed for the slow part (read ids, release, embed,
+write), which shrinks the lock window from minutes to milliseconds, and the
+write retries on 40P01/40001 with a short backoff. The retry deliberately wraps
+the *write* and not the chunk, because the vectors are the expensive part and
+are already in hand by then. A non-retryable sqlstate still raises immediately,
+since a constraint violation is a bug and swallowing it is the exact shape of
+failure that took intake down for twelve hours in August.
+
+**Recovery:** the stranded jobs ran as soon as the workers reached the right
+queue. 985 new listings and 10,119 refreshed in the first fifteen minutes,
+19,011 to 19,996 total, no failures.
+
+380 tests passing, mypy clean across 73 files.
+
+
+## 2026-08-07 - A duplicate scheduler, stale workers reverting extraction, and four rounds of vocabulary
+
+**A second scheduler had been running for 48 hours.** It came from the old
+in-repo `.venv`, predating the move to `C:\venvs\undercut`, and was 13
+hours older than every other process. Two schedulers means two sets of ingest
+and disappearance-check jobs, which is where a day's eBay quota went (3,220 to
+1,690 in an afternoon with no manual scans running). Killed.
+
+**Worse, the RQ workers were older than the code they were running.** They
+started at 01:16, before the accessory fixes landed later that same session, so
+they held the pre-fix `ml/extract.py` in memory. Every re-ingest ran the old
+vocabulary and *overwrote* the flags a manual re-extraction had just set:
+`is_accessory` went back to false on listings that had been correctly
+classified hours earlier, with `last_seen_at` stamped minutes ago to prove it.
+The deal feed filled back up with the exact accessories that had been fixed.
+
+This is the same lesson as the three previous times, in a new costume. The
+worker does not reload code, and here it did not merely *fail* to apply a fix,
+it actively reverted stored data. The order that works is: restart the workers
+first, re-extract second. Reversed, the re-extraction is undone by the next
+ingest cycle and looks like the fix never worked.
+
+`rq.exe` also would not exec under `nohup` ("Permission denied", same
+Application Control shape as the rollup binary), so the workers now start
+through a two-line Python shim calling `rq.cli:main`.
+
+**Then four rounds of vocabulary, each one found by reading the feed.**
+
+| # | Miss | Fix |
+|---|------|-----|
+| 1 | `PCB Board For ZOTAC RTX 4090`, $69.99 vs $2,719 | `pcb` added to the title-initial subject nouns |
+| 2 | `GPU AND MEMORY MISSING - MSI RTX 4090`, $74.97 | reversed word order, category-gated |
+| 3 | `Non-Functional Device`, `PARTS OR REPAIR` | adjective and slash forms of claims already covered |
+| 4 | `... graphics card bezel blank`, $28.50 | `bezel` added to accessory nouns |
+
+Round 2 is the interesting one. The defect vocabulary read `MISSING CORE`;
+sellers equally write `GPU AND MEMORY MISSING`, and the reversed order matched
+nothing. It cannot be a blanket rule, because the component/machine split
+applies exactly as it does to "no GPU": a *component* missing its core is
+broken, a *machine* missing one is a working reduced configuration. So it is
+gated on eBay's category, reusing the discriminator that already exists.
+
+Rounds 3 and 4 share a shape worth naming: **the vocabulary already covered the
+same claim in different words.** "not working" was there, "Non-Functional" was
+not. "spares or repair" was there, "parts or repair" was not. Sellers say one
+thing many ways and a regex knows the ways it was taught.
+
+**A corpus probe killed two rules before they were written, and that is the
+part worth keeping.** The obvious fix for a $44.99 "Graphics Card BOX" is to
+flag a title ending in "box". Measured first: 160 listings, led by a **$4,750
+RTX 5090 Founders "with Original Box"** and a $3,000 4090 "With Retail Box". A
+seller who kept the packaging says so at the end of the title, exactly where
+the rule looked. Likewise a bare "parts" rule hit a real $2,000 gaming PC and a
+$600 "PC Parts Bundle". Both rejected; only the narrow forms went in
+(`parts/repair`, and "parts" paired with READ), which changed 9 listings, all
+genuinely broken.
+
+Net effect across all four rounds: **24 listings newly excluded out of 19,011,
+0.13%, with no false positive above $99.** Small numbers by design. These rules
+*exclude* listings from comps, so a wrong one silently deletes real price
+history, and the cost of a miss is one bad feed entry against the cost of a
+false positive being a corrupted comp set.
+
+**Three of the top ten are still questionable and deliberately left alone:** a
+"Graphics Card BOX", an ambiguous "Cooler Master/ Asus rtx 5090", and a card
+whose only warning is "- Read". Each would need a rule that the probe says
+costs more than it saves. `READ` stays a recorded signal and not a defect,
+which is the original call and still the right one: it means "something is
+unusual", not "this is broken".
+
+**The heredoc backslash bug happened a third time**, turning `\b` into a
+literal backspace byte inside three regexes. Repaired, and a repo-wide sweep
+found no others. Edits to regex vocabulary now go through the editing tool or
+a script file, never a shell heredoc.
+
+375 tests passing (up from 357), mypy clean across 71 files.
+
+**Still open:** the old 4.6 GB `.venv` is still sitting in the OneDrive-synced
+folder. Nothing uses it now that the stale scheduler is dead, and deleting it
+is a clean uninstall, but that is the user's call to make.
+
+
 ## 2026-08-01 - React dashboard, and the feed auditing the extractor in real time
 
 **Did:**

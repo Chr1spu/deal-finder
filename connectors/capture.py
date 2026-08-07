@@ -130,7 +130,12 @@ def to_listing(captured: CapturedListing, now: datetime | None = None) -> Listin
     # matched immediately, and its own completeness is what decides whether
     # the comp set gets filtered. A Depop "console only" matched against
     # complete eBay bundles is precisely the error this guards.
-    variant = extract_variant(captured.title, _attributes(captured), captured.brand)
+    #
+    # No category is passed, and a brand is NOT one. extract_variant reads
+    # category as eBay's taxonomy ("Water Cooling", "Mixed Lots"), so a brand
+    # in that slot can only misfire: "Snap-on Tools" contains an accessory
+    # token and would flag the listing as an accessory.
+    variant = extract_variant(captured.title, _attributes(captured))
     return Listing(
         source=captured.source,
         source_id=captured.source_id,
@@ -141,7 +146,15 @@ def to_listing(captured: CapturedListing, now: datetime | None = None) -> Listin
         images=captured.images,
         location=captured.location,
         condition=captured.condition,
-        category=captured.brand,
+        # Left null on purpose. `category` holds eBay's taxonomy, and
+        # ml/similar.py filters candidates on it with `==`, no unstated
+        # escape hatch, because on eBay it is always present. Storing a brand
+        # here ("Nike") therefore matched zero eBay rows and every captured
+        # listing with a brand retrieved no candidates at all: the one thing
+        # the extension exists to do. A foreign listing has no eBay category,
+        # and null is how this schema says "unstated". Brand travels in
+        # aspects, where the matcher can read it without gating on it.
+        category=None,
         aspects=_attributes(captured),
         url=captured.url,
         first_seen_at=now,

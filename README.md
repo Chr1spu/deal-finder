@@ -19,6 +19,13 @@ Neither can be polled server-side: Facebook's ToS forbids it, and Depop returns 
 
 The overlay shows what comparable eBay listings are **asking**, alongside the candidates it matched. It deliberately does not compute a "% below market" figure: those are asking prices, not sold prices, and the number would imply a precision the data does not yet have.
 
+**On a first live run, check these four things in order.** This path has been exercised end to end in tests but not yet against a real page, so a failure here is expected to be a page-parsing problem rather than a pipeline one.
+
+1. The button is enabled. If the popup says to open a listing page, the URL is not one the manifest injects into (`www.depop.com/products/*`, `www.facebook.com/marketplace/item/*`); the popup reads that list from the manifest, so those are the only two.
+2. The capture is stored: the overlay names the listing and its price. A "could not read this listing" message means the page markup moved, which is expected occasionally and is a parser fix in `extension/sites/`.
+3. `analysed: false` on the first click is normal. The API has no torch, so embedding is queued for the ML worker; click "Check again" a moment later.
+4. Candidates come back non-empty. An empty list on a listing that plainly resembles eBay stock is the signal worth investigating: it means retrieval is being filtered to nothing rather than finding nothing (this is what `category=brand` used to do to every branded capture, see ADR [0018](docs/decisions/0018-memory-kits-are-one-product.md)'s sibling fix in the 2026-08-07 devlog entry).
+
 ## Setup
 
 1. Copy `.env.example` to `.env` and fill in eBay Browse API credentials (developer.ebay.com).

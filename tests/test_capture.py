@@ -81,6 +81,25 @@ def test_structured_attributes_land_in_the_shared_aspects_column():
     assert listing.aspects == {"Brand": "Nike", "Size": "10"}
 
 
+def test_a_brand_is_not_a_category():
+    """`category` holds eBay's taxonomy and ml/similar.py filters candidates on
+    it with `==`, with no unstated escape hatch. Storing "Nike" there matched
+    no eBay row, so every captured listing carrying a brand retrieved zero
+    candidates: the extension's entire purpose, failing silently."""
+    listing = to_listing(payload())
+
+    assert listing.category is None
+    assert listing.aspects["Brand"] == "Nike", "brand is kept, just not as a category"
+
+
+def test_a_brand_cannot_trip_the_category_gated_extraction_rules():
+    """The same confusion in the other direction: category tokens decide what
+    counts as an accessory, and "Snap-on Tools" contains one."""
+    listing = to_listing(payload(brand="Snap-on Tools", title="Snap-on ratchet set"))
+
+    assert listing.is_accessory is False
+
+
 def test_captured_listings_are_never_auctions_or_gtc():
     listing = to_listing(payload())
     assert listing.is_auction is False

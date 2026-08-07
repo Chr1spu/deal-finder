@@ -10,7 +10,7 @@ and these tests skip when it isn't running rather than failing the suite.
 from sqlalchemy import text
 from sqlmodel import Session, col, delete, select
 
-from api.models import EMBEDDING_DIM, Listing
+from api.models import EMBEDDING_DIM, Listing, PriceObservation
 from ml.similar import find_similar_to_listing, find_similar_to_vector
 
 
@@ -36,6 +36,9 @@ def make_listing(source_id: str, title: str, vector: list[float] | None, source:
 
 def clear(engine) -> None:
     with Session(engine) as session:
+        # Observations first: they carry an FK to listing, and a test that goes
+        # through save_capture leaves one behind.
+        session.execute(delete(PriceObservation))
         session.execute(delete(Listing))  # execute, not exec: SQLModel.exec only types selects
         session.commit()
 
@@ -396,6 +399,46 @@ def test_model_key_is_an_exact_match_not_a_soft_one(pg_engine):
                                      model_key="rtx-3080-ti")
 
     assert [m.listing.source_id for m in matches] == ["same"]
+
+
+def test_a_captured_listing_can_reach_ebay_candidates_at_all(pg_engine):
+    """The cross-source path, end to end through real k-NN.
+
+    A foreign listing has no eBay category, and category is a hard `==` filter
+    with no unstated escape hatch, so anything stored there that is not an eBay
+    category name silently reduces the candidate set to nothing. Captured rows
+    used to store the brand in that column, which made this return zero for
+    every Depop listing that named a brand.
+    """
+    from connectors.capture import CapturedListing, save_capture
+    from ml.match import match_listing
+
+    clear(pg_engine)
+    with Session(pg_engine) as session:
+        reference = make_priced("ebay-ref", "Nike Air Max 90 white", 120.0,
+                                vector=unit_vector(1.0))
+        reference.category = "Athletic Shoes"
+        session.add(reference)
+        session.commit()
+
+    captured, _ = save_capture(
+        CapturedListing(
+            source="depop", source_id="d-1", title="nike air max 90 white size 10",
+            price=65.0, url="https://www.depop.com/products/x/", brand="Nike",
+            images=["https://media-photos.depop.com/x.jpg"],
+        ),
+        db_engine=pg_engine,
+        image_hasher=lambda url: None,
+    )
+    with Session(pg_engine) as session:
+        row = session.get(Listing, captured.id)
+        row.embedding = unit_vector(1.0, 0.02)
+        session.add(row)
+        session.commit()
+
+    result = match_listing(captured.id, db_engine=pg_engine)
+
+    assert [c.listing.source_id for c in result.candidates] == ["ebay-ref"]
 
 
 def test_other_spec_filters_still_keep_unstated_rows(pg_engine):
