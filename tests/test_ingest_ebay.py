@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -438,7 +438,7 @@ def test_ingest_does_not_erase_what_the_check_learned_from_a_full_body(test_engi
     saved_search = seed_saved_search(test_engine)
     listing_id = seed_stale_schema_listing(
         test_engine,
-        item_end_date=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        item_end_date=datetime(2026, 9, 1, tzinfo=UTC),
         is_gtc=False,
     )
 

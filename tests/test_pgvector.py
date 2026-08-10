@@ -309,7 +309,6 @@ def test_valuation_uses_sold_comps_not_active_ones(pg_engine):
         session.add(make_priced("active", "graphics card", 9999.0, vector=unit_vector(1.0, 0.01)))
         session.commit()
         session.refresh(subject)
-        subject_id = subject.id
         subject_copy = subject
         session.expunge(subject_copy)
 

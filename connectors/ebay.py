@@ -70,7 +70,12 @@ class SearchResult(NamedTuple):
 
 
 class EbayClient:
-    def __init__(self, client_id: str | None = None, client_secret: str | None = None, env: str | None = None):
+    def __init__(
+        self,
+        client_id: str | None = None,
+        client_secret: str | None = None,
+        env: str | None = None,
+    ):
         self.client_id = client_id or settings.ebay_client_id
         self.client_secret = client_secret or settings.ebay_client_secret
         self.env = env or settings.ebay_env

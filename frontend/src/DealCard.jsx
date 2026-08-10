@@ -45,14 +45,17 @@ export default function DealCard({ deal }) {
             {spread > 3 && <span className="warn">spread {spread.toFixed(1)}x</span>}
           </div>
         </div>
-        <span className="chevron">{open ? "▲" : "▼"}</span>
+        <span className={open ? "chevron open" : "chevron"} aria-hidden="true" />
       </header>
 
       {open && (
         <div className="card-body">
-          <a href={deal.url} target="_blank" rel="noopener noreferrer" className="link">
-            Open on {deal.source} &rarr;
-          </a>
+          <div className="filters">
+            <a href={deal.url} target="_blank" rel="noopener noreferrer" className="link">
+              Open on {deal.source} &rarr;
+            </a>
+            <WatchButton listingId={deal.listing_id} />
+          </div>
 
           <h4>Comps this estimate is built from</h4>
           <table className="comps">
@@ -88,6 +91,48 @@ export default function DealCard({ deal }) {
   );
 }
 
+/**
+ * Watching is how a listing outlives the feed. The feed is rebuilt by every
+ * scan, so a listing whose price rises out of the thresholds simply vanishes
+ * from it, taking the reason anyone was interested with it.
+ *
+ * A 409 is reported as success, not as an error: the endpoint refuses a
+ * second add so it cannot silently reset the price the listing was watched
+ * at, and from here "it is already on your watchlist" is the outcome the
+ * click was asking for.
+ */
+function WatchButton({ listingId }) {
+  const [state, setState] = useState("idle");
+  const [error, setError] = useState(null);
+
+  if (!listingId) return null;
+
+  const watch = () => {
+    setState("busy");
+    setError(null);
+    api
+      .watch(listingId)
+      .then(() => setState("watched"))
+      .catch((e) => {
+        if (e.status === 409) {
+          setState("watched");
+        } else {
+          setState("idle");
+          setError(e.message);
+        }
+      });
+  };
+
+  return (
+    <>
+      <button className="tab" disabled={state !== "idle"} onClick={watch}>
+        {state === "watched" ? "On watchlist" : state === "busy" ? "Adding..." : "Watch"}
+      </button>
+      {error && <span className="error">{error}</span>}
+    </>
+  );
+}
+
 function Confidence({ value }) {
   // Ordinal, never a probability (same convention as sale_confidence), so it
   // is drawn as a bar rather than printed as a percentage that would invite
@@ -120,7 +165,7 @@ function PriceChart({ points }) {
   return (
     <div className="chart">
       <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" aria-label="price history">
-        <path d={d} fill="none" stroke="#8ab4f8" strokeWidth="1.2" vectorEffect="non-scaling-stroke" />
+        <path d={d} fill="none" stroke="currentColor" strokeWidth="1.2" vectorEffect="non-scaling-stroke" />
       </svg>
       <div className="chart-labels muted">
         <span>{money(values[0])}</span>

@@ -26,7 +26,7 @@ into the RQ scheduler via systems/queue.py + systems/scheduler.py.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from sqlalchemy import Engine
@@ -38,6 +38,7 @@ from api.settings import settings
 from connectors.ebay import EbayClient
 from connectors.normalizer import enrich_from_item_body, listing_has_ended
 from connectors.sale_confidence import find_relist, score_sale
+from ml.extract import extract_variant
 from systems.preflight import assert_schema_current
 from systems.ratelimit import QuotaExhaustedError
 
@@ -155,7 +156,7 @@ def retire_stale_listings(
     to active for free if it ever reappears.
     """
     db_engine = db_engine or default_engine
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
 
     stale_cutoff = now - timedelta(days=settings.stale_after_days)
     unseen_cutoff = now - timedelta(days=settings.unseen_after_days)
@@ -197,7 +198,7 @@ def check_listings_for_source(
     client = client or PULL_BASED_SOURCES[source]()
     db_engine = db_engine or default_engine
     assert_schema_current(db_engine, Listing)
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
 
     result = CheckResult()
     result.retired_stale = retire_stale_listings(source, db_engine=db_engine, now=now)
@@ -273,6 +274,40 @@ def check_listings_for_source(
             if isinstance(found, dict):
                 enrich_from_item_body(listing, found)
                 result.enriched += 1
+
+                # Re-derive the extracted fields, because enrichment can have
+                # just supplied the input they were missing.
+                #
+                # `aspects` is a getItem-only field, so a listing is ingested
+                # and extracted with no aspects at all, and only learns them
+                # here, hours or days later. Extraction never revisits it:
+                # `extract_all(only_new=True)` keys on `variant_signals IS
+                # NULL` and this row was extracted long ago. So the row stayed
+                # permanently one enrichment behind, with a capacity that was
+                # derivable and simply not derived.
+                #
+                # Measured 2026-08-10: 74 listings (0.28%), every one of them
+                # a console or phone whose capacity lives only in aspects, all
+                # already checked, all still reading `capacity_gb = NULL`. The
+                # only thing that ever fixed them was a manual full
+                # re-extraction, which is not a mechanism.
+                #
+                # Cheap enough to do unconditionally: extraction is regex over
+                # a title plus a dict lookup, against a network round-trip
+                # this loop has already paid for.
+                variant = extract_variant(
+                    listing.title, listing.aspects, listing.category, listing.condition
+                )
+                listing.lot_size = variant.lot_size
+                listing.completeness = variant.completeness
+                listing.has_defect = variant.has_defect
+                listing.is_accessory = variant.is_accessory
+                listing.price_is_from = variant.price_is_from
+                listing.capacity_gb = variant.capacity_gb
+                listing.spec_generation = variant.spec_generation
+                listing.form_factor = variant.form_factor
+                listing.model_key = variant.model_key
+                listing.variant_signals = variant.signals
 
             # A 404 is NOT the signal. eBay keeps serving ended listings at
             # HTTP 200 with estimatedAvailabilityStatus OUT_OF_STOCK and/or a

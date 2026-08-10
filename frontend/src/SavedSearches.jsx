@@ -53,11 +53,16 @@ export default function SavedSearches() {
   return (
     <section>
       <div className="budget">
-        <strong>{b.enabled_searches}</strong> enabled searches ×{" "}
-        {b.calls_per_search_per_day} calls/day = {b.ingest_calls_per_day} ingest, plus{" "}
-        {b.check_calls_per_day} checking ={" "}
-        <strong>{b.total_calls_per_day}</strong> of {b.daily_limit} daily eBay calls.
-        <div className={headroom < 10 ? "warn" : "muted"}>
+        {/* The constraint leads, as a figure rather than a sentence, because
+            it is the number the API refuses on and the one worth reading
+            before typing a keyword. */}
+        <span className="budget-figure">
+          {b.total_calls_per_day.toLocaleString()} / {b.daily_limit.toLocaleString()}
+        </span>
+        eBay calls a day: {b.enabled_searches} enabled searches at{" "}
+        {b.calls_per_search_per_day}/day = {b.ingest_calls_per_day.toLocaleString()} for ingest,
+        plus {b.check_calls_per_day.toLocaleString()} for disappearance checking.
+        <div className={headroom < 10 ? "warn" : "muted"} style={{ marginTop: 4 }}>
           Room for {headroom} more {headroom === 1 ? "search" : "searches"}.
         </div>
       </div>

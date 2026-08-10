@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import Engine
 from sqlmodel import Session, col, select
@@ -85,7 +85,9 @@ def extract_all(
 
             for listing in listings:
                 last_id = listing.id or last_id
-                variant = extract_variant(listing.title, listing.aspects, listing.category)
+                variant = extract_variant(
+                    listing.title, listing.aspects, listing.category, listing.condition
+                )
 
                 # Every derived field, not just the original three. Comparing
                 # a subset made `changed` report 0 after a run that rewrote
@@ -156,9 +158,9 @@ if __name__ == "__main__":
     import sys
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    started = datetime.now(timezone.utc)
+    started = datetime.now(UTC)
     outcome = extract_all(only_new="--only-new" in sys.argv)
-    elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+    elapsed = (datetime.now(UTC) - started).total_seconds()
     print(
         f"Processed {outcome.processed} listings in {elapsed:.0f}s: "
         f"{outcome.lots} lots, {outcome.defects} defective, {outcome.accessories} accessories, "

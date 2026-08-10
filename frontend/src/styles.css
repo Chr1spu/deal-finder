@@ -1,121 +1,340 @@
+/* Undercut dashboard.
+ *
+ * The design brief is the product: this is a tool for reading price evidence,
+ * not for glancing at a status light. Every screen here is a dense table of
+ * money, and the previous stylesheet fought that by wrapping each row in a
+ * rounded panel, which spent most of the width on borders and padding and made
+ * two prices hard to compare because they were not on a shared grid.
+ *
+ * So: hairline rules instead of cards, tabular figures on a mono stack so
+ * digits line up in columns, one accent colour reserved for the discount, and
+ * type scale doing the hierarchy that boxes were doing before. Light by
+ * default because the content is small text you study rather than a monitor
+ * you watch, with a real dark pair for anyone whose OS asks for it.
+ *
+ * No web fonts. This runs on a machine that may be offline and a dashboard
+ * that waits on a font CDN to render its own numbers is worse than one using
+ * the good fonts already installed.
+ */
+
 :root {
-  --bg: #14161a;
-  --panel: #1b1e24;
-  --line: #2a2f38;
-  --text: #e8e8ea;
-  --muted: #9aa0aa;
-  --link: #8ab4f8;
-  --good: #6ee7a8;
-  --warn: #f0b866;
-  --error: #f08a8a;
+  --paper: #faf9f6;
+  --raised: #f2f0ea;
+  --ink: #1a1814;
+  --ink-2: #57534a;
+  --ink-3: #8b857a;
+  --rule: #ddd9d0;
+  --rule-strong: #c4bfb3;
+
+  /* One accent, reserved for the discount figure and nothing else, so its
+     presence always means the same thing. */
+  --signal: #a33327;
+  --signal-strong: #7d241a;
+  --link: #1f5f5b;
+  --warn: #8a6212;
+  --error: #a33327;
+
+  --mono: "Cascadia Mono", "JetBrains Mono", "SF Mono", "Consolas", ui-monospace, monospace;
+  --sans: "Inter", "Segoe UI Variable Text", "Segoe UI", -apple-system, system-ui, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #16150f;
+    --raised: #1e1c16;
+    --ink: #ece8dd;
+    --ink-2: #a9a396;
+    --ink-3: #7b7568;
+    --rule: #2e2b23;
+    --rule-strong: #45413a;
+
+    --signal: #e08573;
+    --signal-strong: #f0a08c;
+    --link: #6fb5ac;
+    --warn: #d6a54a;
+    --error: #e08573;
+  }
 }
 
 * { box-sizing: border-box; }
 
 body {
   margin: 0;
-  background: var(--bg);
-  color: var(--text);
-  font: 14px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: var(--paper);
+  color: var(--ink);
+  font: 13px/1.55 var(--sans);
+  -webkit-font-smoothing: antialiased;
 }
 
-.app { max-width: 900px; margin: 0 auto; padding: 20px 16px 60px; }
+.app { max-width: 1080px; margin: 0 auto; padding: 0 24px 80px; }
 
-.top { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 18px; }
-.top h1 { font-size: 18px; margin: 0; }
-.top nav { display: flex; gap: 6px; }
-.apikey {
-  margin-left: auto; width: 220px; padding: 6px 8px; font-size: 12px;
-  background: var(--panel); color: var(--text);
-  border: 1px solid var(--line); border-radius: 6px;
+/* --- masthead ------------------------------------------------------------ */
+
+.top {
+  display: flex;
+  align-items: baseline;
+  gap: 20px;
+  flex-wrap: wrap;
+  padding: 26px 0 0;
+  border-bottom: 1px solid var(--rule-strong);
+  margin-bottom: 22px;
 }
 
+.top h1 {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  margin: 0 0 14px;
+}
+
+.top nav { display: flex; gap: 20px; margin-bottom: -1px; }
+
+/* Tabs are underlined words, not pills. A pill implies a button you press;
+   these are sections you are already inside one of. */
 .tab {
-  background: none; border: 1px solid transparent; color: var(--muted);
-  padding: 5px 10px; border-radius: 6px; cursor: pointer; font-size: 13px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--ink-3);
+  padding: 0 0 11px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  letter-spacing: 0.01em;
 }
-.tab.active { color: var(--text); border-color: var(--line); background: var(--panel); }
+.tab:hover { color: var(--ink-2); }
+.tab.active { color: var(--ink); border-bottom-color: var(--signal); }
 
-.muted { color: var(--muted); }
-.small { font-size: 12px; }
+.apikey {
+  margin-left: auto;
+  width: 190px;
+  padding: 5px 7px;
+  margin-bottom: 10px;
+  font: 11px/1.4 var(--mono);
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+}
+.apikey:focus { outline: none; border-color: var(--rule-strong); }
+
+/* --- shared -------------------------------------------------------------- */
+
+.muted { color: var(--ink-3); }
+.small { font-size: 11px; }
 .warn { color: var(--warn); }
-.error { color: var(--error); }
-.link { color: var(--link); text-decoration: none; font-size: 13px; }
+.error { color: var(--error); font-size: 12px; }
+
+.link {
+  color: var(--link);
+  text-decoration: none;
+  font-size: 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--link) 35%, transparent);
+}
+.link:hover { border-bottom-color: var(--link); }
+
+/* Every figure in this app is money or a count, and they are read in columns.
+   Tabular numerals keep the digits on a shared grid so two prices can be
+   compared by eye without reading them. */
+.figures strong,
+.score,
+.num,
+.chart-labels,
+.budget-figure { font-variant-numeric: tabular-nums; font-family: var(--mono); }
 
 .note {
-  background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--warn);
-  border-radius: 6px; padding: 9px 12px; font-size: 12px; color: var(--muted); margin: 12px 0;
+  border-left: 2px solid var(--warn);
+  padding: 2px 0 2px 12px;
+  font-size: 12px;
+  color: var(--ink-2);
+  margin: 16px 0;
+  max-width: 68ch;
 }
 
-.filters { display: flex; gap: 24px; flex-wrap: wrap; margin-bottom: 6px; }
-.filters label { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.filters {
+  display: flex;
+  gap: 26px;
+  flex-wrap: wrap;
+  align-items: center;
+  padding-bottom: 14px;
+  font-size: 12px;
+}
+.filters label { display: flex; align-items: center; gap: 8px; color: var(--ink-2); }
+.filters input[type="range"] { accent-color: var(--signal); width: 110px; }
+.filters input[type="text"] {
+  padding: 5px 7px; background: transparent; color: var(--ink);
+  border: 1px solid var(--rule); border-radius: 2px; font: inherit; min-width: 220px;
+}
 
-/* --- deal cards --- */
+/* --- deal rows ----------------------------------------------------------- */
 
+/* Rows, not cards. A list of comparable things should sit on one grid; the
+   old rounded panels put a border and 14px of padding between every pair of
+   prices anyone wanted to compare. */
 .card {
-  background: var(--panel); border: 1px solid var(--line);
-  border-radius: 8px; margin-bottom: 10px; overflow: hidden;
+  border-bottom: 1px solid var(--rule);
 }
-.card-head { display: flex; gap: 14px; align-items: center; padding: 12px 14px; cursor: pointer; }
-.card-head:hover { background: #1f232a; }
+.card:first-of-type { border-top: 1px solid var(--rule); }
+
+.card-head {
+  display: grid;
+  grid-template-columns: 78px 1fr auto;
+  gap: 18px;
+  align-items: baseline;
+  padding: 13px 4px;
+  cursor: pointer;
+}
+.card-head:hover { background: var(--raised); }
 
 .score {
-  min-width: 68px; text-align: center; font-size: 19px; font-weight: 600;
-  color: var(--warn); line-height: 1.1;
+  font-size: 21px;
+  font-weight: 500;
+  color: var(--signal);
+  line-height: 1.05;
+  letter-spacing: -0.02em;
 }
-.score-high { color: var(--good); }
-.score-label { display: block; font-size: 10px; font-weight: 400; color: var(--muted); }
+.score-high { color: var(--signal-strong); font-weight: 600; }
+.score-label {
+  display: block;
+  font-family: var(--sans);
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--ink-3);
+  letter-spacing: 0.03em;
+  margin-top: 3px;
+}
 
-.card-main { flex: 1; min-width: 0; }
+.card-main { min-width: 0; }
 .card-main h3 {
-  margin: 0 0 4px; font-size: 14px; font-weight: 500;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  margin: 0 0 5px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.figures { display: flex; gap: 12px; align-items: center; font-size: 12px; flex-wrap: wrap; }
-.chevron { color: var(--muted); font-size: 10px; }
+.figures {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--ink-2);
+  flex-wrap: wrap;
+}
+.figures strong { color: var(--ink); font-weight: 600; }
 
-/* Ordinal, not a probability, so it is a bar rather than a number that
-   invites being read as a percentage. */
-.conf { display: inline-block; width: 44px; height: 5px; background: var(--line); border-radius: 3px; }
-.conf-fill { display: block; height: 100%; background: var(--link); border-radius: 3px; }
+/* A caret drawn in CSS rather than a glyph, so it rotates rather than
+   swapping between two characters of different widths. */
+.chevron {
+  width: 7px; height: 7px; align-self: center;
+  border-right: 1.5px solid var(--ink-3);
+  border-bottom: 1.5px solid var(--ink-3);
+  transform: rotate(45deg);
+  transition: transform 120ms ease;
+  font-size: 0;
+}
+.chevron.open { transform: rotate(-135deg); }
 
-.card-body { padding: 4px 14px 14px; border-top: 1px solid var(--line); }
-.card-body h4 { font-size: 12px; color: var(--muted); font-weight: 500; margin: 14px 0 6px; }
+/* Ordinal, never a probability, so it stays a bar rather than a number that
+   would invite being read as a percentage. */
+.conf { display: inline-block; width: 40px; height: 3px; background: var(--rule); }
+.conf-fill { display: block; height: 100%; background: var(--ink-2); }
+
+/* The expansion is indented under a rule rather than boxed, so it reads as
+   evidence belonging to the row above it. */
+.card-body {
+  padding: 2px 0 20px 96px;
+  border-left: 1px solid var(--rule);
+  margin-left: 12px;
+}
+.card-body h4 {
+  font-size: 10px;
+  color: var(--ink-3);
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  margin: 18px 0 8px;
+}
 
 .comps { width: 100%; border-collapse: collapse; font-size: 12px; }
-.comps td { padding: 5px 6px; border-top: 1px solid var(--line); }
+.comps td { padding: 5px 10px 5px 0; border-top: 1px solid var(--rule); vertical-align: baseline; }
+.comps tr:first-child td { border-top: none; }
 .comps td:first-child { max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.comps a { color: var(--link); text-decoration: none; }
-.num { text-align: right; white-space: nowrap; }
+.comps a { color: var(--ink); text-decoration: none; }
+.comps a:hover { color: var(--link); }
+.num { text-align: right; white-space: nowrap; font-size: 12px; }
 
-.chart { margin: 14px 0 4px; }
-.chart svg { width: 100%; height: 40px; display: block; }
-.chart-labels { display: flex; justify-content: space-between; font-size: 11px; margin-top: 2px; }
+.chart { margin: 16px 0 4px; max-width: 520px; color: var(--link); }
+.chart svg { width: 100%; height: 36px; display: block; }
+.chart-labels {
+  display: flex; justify-content: space-between;
+  font-size: 10px; margin-top: 4px; color: var(--ink-3);
+}
 
-.caveats { margin: 12px 0 0; padding-left: 16px; font-size: 11px; color: var(--muted); line-height: 1.5; }
+.caveats {
+  margin: 16px 0 0; padding-left: 15px;
+  font-size: 11px; color: var(--ink-3); line-height: 1.6; max-width: 68ch;
+}
 
-/* --- saved searches --- */
+/* An ended listing stays on the watchlist because "it sold" is the outcome
+   being recorded, so it reads as finished rather than as an error. */
+.card-ended .card-head { opacity: 0.6; }
+.card-ended .score { color: var(--ink-3); }
 
+/* --- saved searches ------------------------------------------------------ */
+
+/* The budget leads the page because it is the constraint the whole feature
+   exists to respect: the API refuses a search that would exceed it. */
 .budget {
-  background: var(--panel); border: 1px solid var(--line);
-  border-radius: 8px; padding: 12px 14px; font-size: 13px; margin-bottom: 14px;
+  border-top: 2px solid var(--ink);
+  border-bottom: 1px solid var(--rule);
+  padding: 14px 0 16px;
+  font-size: 12px;
+  color: var(--ink-2);
+  margin-bottom: 20px;
+  max-width: 72ch;
 }
-.add-row { display: flex; gap: 8px; margin-bottom: 12px; }
+.budget-figure {
+  display: block;
+  font-size: 26px;
+  color: var(--ink);
+  letter-spacing: -0.02em;
+  margin-bottom: 6px;
+}
+
+.add-row { display: flex; gap: 10px; margin-bottom: 18px; }
 .add-row input {
-  flex: 1; padding: 8px 10px; background: var(--panel); color: var(--text);
-  border: 1px solid var(--line); border-radius: 6px;
+  flex: 1; max-width: 380px; padding: 7px 9px;
+  background: transparent; color: var(--ink);
+  border: 1px solid var(--rule); border-radius: 2px; font: inherit;
 }
-.add-row button {
-  padding: 8px 16px; background: #2a2f38; color: var(--text);
-  border: 1px solid #3a4049; border-radius: 6px; cursor: pointer;
+.add-row input:focus { outline: none; border-color: var(--rule-strong); }
+.add-row button,
+.card-body .tab {
+  padding: 7px 15px;
+  background: var(--ink);
+  color: var(--paper);
+  border: 1px solid var(--ink);
+  border-radius: 2px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
 }
-.add-row button:disabled { opacity: 0.45; cursor: default; }
+.add-row button:hover:not(:disabled),
+.card-body .tab:hover:not(:disabled) { background: var(--signal); border-color: var(--signal); }
+.add-row button:disabled,
+.card-body .tab:disabled { opacity: 0.35; cursor: default; }
 
 .searches { list-style: none; padding: 0; margin: 0; }
 .searches li {
-  display: flex; align-items: center; gap: 10px;
-  padding: 6px 4px; border-bottom: 1px solid var(--line); font-size: 13px;
+  display: flex; align-items: center; gap: 12px;
+  padding: 7px 4px; border-bottom: 1px solid var(--rule); font-size: 13px;
 }
-.searches label { display: flex; align-items: center; gap: 8px; flex: 1; cursor: pointer; }
-.searches li.disabled span { color: var(--muted); text-decoration: line-through; }
-.truncated { font-size: 11px; }
+.searches li:first-child { border-top: 1px solid var(--rule); }
+.searches li:hover { background: var(--raised); }
+.searches label { display: flex; align-items: center; gap: 10px; flex: 1; cursor: pointer; }
+.searches input[type="checkbox"] { accent-color: var(--signal); }
+.searches li.disabled span { color: var(--ink-3); text-decoration: line-through; }
+.truncated { font-size: 11px; font-family: var(--mono); }

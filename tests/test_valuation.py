@@ -6,8 +6,9 @@ real Postgres in tests/test_pgvector.py, since it needs pgvector.
 """
 
 import pytest
+from sqlmodel import Session
 
-from api.models import Listing, ListingStatus
+from api.models import EMBEDDING_DIM, Listing, ListingStatus
 from ml.valuation import (
     UPWARD_BIAS_CAVEAT,
     Comp,
@@ -140,3 +141,59 @@ def test_deal_score_is_a_fraction_of_the_estimate(asking, estimate, expected):
     """Positive means below the estimate. Expressed as a fraction so it reads
     as a percentage."""
     assert pytest.approx((estimate - asking) / estimate) == expected
+
+
+def test_auctions_are_not_scanned_as_deals(test_engine):
+    """An auction's price is the current bid, and with no bids it is an opening
+    bid set deliberately low. Scoring that as a discount measures the seller's
+    marketing rather than the market. ADR 0004 captured `is_auction` for this
+    and left the decision to real data; 451 active auctions, 279 at zero bids.
+
+    Note the asymmetry this test does NOT assert: a *sold* auction stays
+    eligible as a comp, because its final price is a real transaction.
+    """
+    from ml.valuation import deal_candidates
+
+    with Session(test_engine) as session:
+        sold = Listing(
+            source="ebay",
+            source_id="sold-1",
+            title="ASUS TUF RTX 4090 24GB",
+            price=2000.0,
+            url="https://ebay.com/1",
+            status=ListingStatus.likely_sold,
+            model_key="rtx-4090",
+            embedding=[0.1] * EMBEDDING_DIM,
+        )
+        auction = Listing(
+            source="ebay",
+            source_id="auction-1",
+            title="PNY RTX 4090 Verto 24gb",
+            price=107.87,
+            url="https://ebay.com/2",
+            status=ListingStatus.active,
+            model_key="rtx-4090",
+            is_auction=True,
+            bid_count=0,
+            embedding=[0.1] * EMBEDDING_DIM,
+        )
+        fixed_price = Listing(
+            source="ebay",
+            source_id="buy-it-now-1",
+            title="MSI RTX 4090 SUPRIM 24GB",
+            price=1500.0,
+            url="https://ebay.com/3",
+            status=ListingStatus.active,
+            model_key="rtx-4090",
+            is_auction=False,
+            embedding=[0.1] * EMBEDDING_DIM,
+        )
+        session.add_all([sold, auction, fixed_price])
+        session.commit()
+        session.refresh(auction)
+        session.refresh(fixed_price)
+        auction_id, fixed_id = auction.id, fixed_price.id
+
+    candidates = deal_candidates(db_engine=test_engine)
+    assert fixed_id in candidates
+    assert auction_id not in candidates

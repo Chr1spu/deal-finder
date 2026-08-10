@@ -67,4 +67,19 @@ export const api = {
   setSearchEnabled: (id, enabled) =>
     request(`/saved-searches/${id}`, { method: "PATCH", body: JSON.stringify({ enabled }) }),
   deleteSearch: (id) => request(`/saved-searches/${id}`, { method: "DELETE" }),
+
+  // The watchlist reads open like everything else; adding, annotating and
+  // removing carry the key.
+  watchlist: (params = {}) => {
+    const query = new URLSearchParams(params).toString();
+    return request(`/watchlist${query ? `?${query}` : ""}`);
+  },
+  watch: (listingId, note) =>
+    request("/watchlist", {
+      method: "POST",
+      body: JSON.stringify({ listing_id: listingId, note: note || null }),
+    }),
+  setWatchNote: (listingId, note) =>
+    request(`/watchlist/${listingId}`, { method: "PATCH", body: JSON.stringify({ note }) }),
+  unwatch: (listingId) => request(`/watchlist/${listingId}`, { method: "DELETE" }),
 };

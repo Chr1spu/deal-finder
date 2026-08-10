@@ -1,5 +1,657 @@
 # Devlog
 
+## 2026-08-10 - Redesigned the dashboard around the thing it is for
+
+**The deal feed is a table of money, and the stylesheet was fighting that.**
+Every row was a rounded panel on a raised background, so any two prices anyone
+wanted to compare had a border, 14px of padding and a 10px gap between them,
+and none of the figures shared a grid. The layout was spending its width on
+separating things that exist to be read together.
+
+Rebuilt around that:
+
+- **Rows, not cards.** Hairline rules and a three-column grid
+  (discount / title / metrics), so the discount figures form a column down the
+  left edge and can be scanned without reading.
+- **Tabular figures on a mono stack.** `font-variant-numeric: tabular-nums`
+  plus Cascadia/JetBrains/SF Mono/Consolas for every price, percentage and
+  count. Digits now line up by place value, which is the difference between
+  comparing two prices and reading two prices.
+- **One accent.** The old palette had blue for links, green for good, amber for
+  warn and red for error, which meant colour carried four meanings and none of
+  them reliably. Now a single signal colour is reserved for the discount and
+  nothing else, so its presence always means the same thing.
+- **Type carries the hierarchy** that boxes were carrying: a 21px figure
+  against 13px titles and 10px uppercase section labels.
+- **The expansion is indented under a rule** rather than boxed, so the comps
+  read as evidence belonging to the row above them rather than as a second
+  card.
+- **Tabs are underlined words**, not pills. A pill implies a button; these are
+  sections you are already inside one of.
+- **The saved-search budget leads with the figure** (`3,568 / 5,000`) rather
+  than a sentence, because it is the number the API refuses on.
+
+**Light by default, with a real dark pair** under `prefers-color-scheme`. The
+content is small text that gets studied rather than a status board that gets
+glanced at, and dense tabular figures hold up better on a light ground. Both
+palettes are defined properly rather than one being an inversion of the other.
+
+**No web fonts.** This runs on a machine that may be offline, and a dashboard
+that waits on a font CDN to render its own numbers is worse than one using the
+good fonts already installed.
+
+Two small correctness fixes fell out. The price-chart stroke was hardcoded to
+the old palette's blue in both `DealCard.jsx` and `Watchlist.jsx`, which would
+have been nearly invisible on the light ground; it is `currentColor` now, with
+the stylesheet owning it. And the expand caret was two different glyphs
+(`\u25b2` / `\u25bc`) of different widths, so the row shifted slightly on every
+toggle; it is one CSS caret that rotates.
+
+Also cleared a **Vite dev server left running since 2026-08-07** that was still
+holding port 5173, which is why a newly started one silently landed on 5174.
+Same shape as the stale RQ workers and the duplicate scheduler: a long-lived
+process outliving the session that started it.
+
+CSS 3.8 kB to 6.3 kB, 2.0 kB gzipped. No component logic changed.
+
+## 2026-08-10 - The one function that decided what half the corpus was worth
+
+**44.8% of active listings could ever produce a deal, and the cause was one
+function.** `deal_candidates` needs a `model_key` or an `epid` shared with a
+sold listing; `_model_key` recognised graphics-card chipsets and nothing else.
+Phones survived on `epid` at 86%. Consoles did not: 2 of 2,416 keyed, `epid` at
+33%, so two thirds of the category was structurally unvaluable and nothing said
+so anywhere.
+
+`_CPU_MODEL_RE` turned out to have been written, left **unwired**, and to be
+wrong in a way only measurement shows: its lookahead required a CPU word
+*after* the model number, while sellers write "AMD Ryzen 9 5900X" with the word
+first. It matched at all only when a title happened to say "12-Core" later on.
+Corrected and wired up, CPU coverage went 53.7% to 89.0%.
+
+Three families added, each measured before being wired in, spread as p90/p10
+per `0019`:
+
+| family | keyed | category-wide | within-key |
+|---|---|---|---|
+| processors | 89.0% | 4.06x | 1.81x |
+| consoles | 99.0% | 4.00x | 1.88x |
+| phones | 99.3% | 3.08x | 1.58x |
+
+**Scannable listings went from 9,438 (44.8%) to 14,068 (63.3%)**, and listings
+with neither a key nor an `epid` fell from 6,811 to 3,206.
+
+**Two ordering hazards, both real.** "Nintendo Switch OLED" contains "Nintendo
+Switch" and "iPhone 16e" contains "iPhone 16". Bare-form-first would file a
+$200 OLED and a $120 Lite both as `switch`, a $150 product. Qualified
+alternatives go first in both patterns, with tests asserting the four Switch
+variants stay four keys.
+
+**GPU is tried before CPU because of a measurement, not a preference.** A
+gaming PC names both. Keying PC Desktops by graphics card takes their spread
+from 5.08x to 2.0x and laptops from 3.86x to 1.71x. Keying them by processor
+would group a $900 machine with a $3,000 one. See `0022`.
+
+**The re-audit of every earlier spread number.** `0019` said max/min converges
+on the worst listing present rather than describing a comp set, and that every
+figure in `0012`, `0013` and `0018` is quoted in it. `ml/measure_spread.py`
+now prints both:
+
+| grouping | max/min | p90/p10 |
+|---|---|---|
+| by category, median group | 44.41x | 4.26x |
+| memory segmented by capacity+generation+form | 4.21x | 1.82x |
+| by model_key, median group | 8.80x | 2.69x |
+| **as ml/similar.py actually filters** | **3.85x** | **1.74x** |
+
+The last row had never been measured before. It is the comp set the pipeline
+really builds, and 1.74x typical spread is a good answer that the old metric
+made invisible.
+
+`0013`'s directional claims survive (memory still worst at 9.68x trimmed,
+graphics cards next at 6.26x). Its magnitudes never meant anything.
+
+**One group survived trimming, and it was a real bug.** PC Desktops keyed
+`i9-12900k` sat at 164x p90/p10 over ten listings, two of which were empty
+retail boxes at $20.89 and $31.50 against a group median of $1,300. The
+existing rule catches "Retail Box ONLY"; these say it the other way, a
+packaging noun plus the explicit absence of what belongs in it. That pairing is
+unambiguous where "no CPU" alone is not, because a barebones machine is sold
+without a processor constantly and nobody describes a machine as a "Box Wafer
+NO CPU INCLUDED". Three listings, 0.011%, no false positives. One reads "EMPTU
+Box", so the rule cannot lean on the word "empty".
+
+Second time trimming a metric has found a real defect the untrimmed version
+buried, which is the case for keeping both columns.
+
+**`category_id` is now captured, and nothing filters on it yet.** `ml/similar.py`
+matches `category` with a hard `==` and the name is locale-dependent while
+eBay's numeric id is not: the corpus holds `Grafik-/Videokarten` beside
+`Graphics/Video Cards` and `PC Desktops & All-in-Ones` beside `All-In-Ones`,
+one category under several names treated as separate pools too small to reach
+three comps. Migration `0017` adds the column, ingestion fills it, and the
+disappearance check backfills active rows as it enriches them.
+
+Deliberately not switched over. Every existing row is NULL, so moving the
+filter today would split the corpus into "has an id" and "does not" rather than
+merging the locales, which is strictly worse than the status quo. The switch
+condition is written in `api/models.py`: do it when coverage is high.
+
+**Stage 7 is now actually run, not merely built.** `infra/docker-compose.isolated.yml`
+brings the full stack up on ports 55432/56379/58000/55173 under its own project
+name and its own empty volume, with the scheduler at `replicas: 0` so it cannot
+spend eBay quota on a timer. Verified: migrations ran 0001 to 0017 in order,
+the API answered `/health` and `/watchlist`, nginx served the SPA and proxied
+`/api` correctly, both workers derived the right queue names from code, and a
+real job enqueued from inside the stack round-tripped through the worker with
+one success and zero failures. Torn down with `-v` afterwards; the live corpus
+was verified untouched at 27,995 listings.
+
+The isolated file needed `!override` on every ports list. Compose **merges**
+list fields across files rather than replacing them, so the first attempt tried
+to bind 6379 as well as 56379 and collided with the running host stack
+immediately.
+
+**`WatchlistItem` was missing from `alembic/env.py`.** Found by the lint pass,
+and it is not a lint problem: a model absent from `SQLModel.metadata` is a
+model `alembic revision --autogenerate` will emit a **DROP** for. The migration
+worked because it was written by hand. Registered.
+
+**Lint is clean repo-wide for the first time**, and two of the three decisions
+were configuration rather than edits. `B008` forbids function calls in argument
+defaults, which is precisely how FastAPI declares dependencies, so it is a
+false positive on every route and "fixing" it would break the app: ignored for
+`api/**`. `alembic/versions` is generated, immutable history that has already
+run against production, and accounted for most findings: excluded. The rest
+were fixed properly, including replacing an `assert False` with
+`pytest.raises`.
+
+**Housekeeping.** The four synthetic `depop-*` rows from the 2026-08-27
+exercise are deleted, so the corpus contains no fabricated listings. The stale
+4.6 GB in-repo `.venv` is gone, verified first against
+`UV_PROJECT_ENVIRONMENT`, the running process list and every reference in the
+repo; `uv sync` recreates it.
+
+**The eBay Partner Network application is drafted** at
+`docs/ebay-partner-network-application.md`, with the call-budget arithmetic
+that is its actual argument (disappearance checking at 20 ids per call on a
+separate meter is ~100,000 listing-checks/day against 2,800 today, and frees
+the whole Browse allowance for roughly 400 saved searches instead of 183). It
+records that Marketplace Insights *cannot be granted on request* per eBay's own
+docs and should not be asked for. Submitting needs an EPN account in a real
+name, so that step is the user's.
+
+500 tests passing (up from 465), mypy clean across 38 files, ruff clean.
+
+**Chasing one unexplained listing found two whole classes of defect.** A "PNY
+RTX 4090 Verto 24gb" had been sitting near the top of the deal feed at $107.87
+against a $2,699.99 estimate, with nothing in its title to catch. Its row
+explains it twice over:
+
+    condition   For parts or not working
+    is_auction  True
+    bid_count   0
+
+**eBay states the condition in a column, and nothing had ever read it.**
+`condition` has been stored since migration 0001. The value "For parts or not
+working" is eBay's own enum, set by the seller from a dropdown, and it is
+precisely what `_DEFECT_RE` spends dozens of regex alternatives trying to infer
+from prose. **1,668 listings carry it and 485 had `has_defect` false**, because
+their titles never said so: the title vocabulary catches 71% of a population
+the structured field identifies exactly.
+
+`extract_variant` now takes `condition` alongside `aspects` and `category`, and
+consults it first, because a stated fact beats an inferred one. Locale variants
+are included for the same reason category names needed them (`0021`): the
+corpus holds "Per parti di ricambio o non funzionante" and "Als Ersatzteil /
+defekt". **486 listings newly excluded, 1.73%, nothing un-flagged.** That is
+the largest single gain in comp purity this project has had, and it came from
+reading a column rather than writing a regex. Same lesson as "prefer eBay's
+category taxonomy over title vocabulary", now on a second structured field.
+
+**An auction's price is not an asking price, and `is_auction` was in no
+filter.** ADR `0004` captured the flag specifically because unflagged auctions
+"would have quietly poisoned stage 4's comps", then deferred the decision until
+there was real data. There is now: 451 active auctions, **279 of them with zero
+bids**, where the price is an opening bid the seller set low on purpose.
+Discounting against it measures the seller's marketing, not the market.
+
+`deal_candidates` now excludes auctions. Deliberately asymmetric: they are
+**not** excluded from the comp side, because a *sold* auction's final price is
+a real transaction and therefore better evidence than any unsold listing's
+asking price. Throwing those away would discard the best comps this system has.
+
+**The trailing-"box" rule is dead for the third time, and now the reason is
+known rather than empirical.** A positional version was probed, restricted to
+"box" as an unqualified trailing subject noun. It still catches a $1,500 RTX
+3090 "in original box.", a $1,099 RTX 4080 and a $950 iPhone, and the reason
+turned up in the sample: `INTEL CORE I5-14600K BOX` is not a description at
+all, it is Intel's official retail SKU designation, BOX as opposed to TRAY. The
+word has three meanings in titles (the product, a condition statement, a SKU
+suffix) and no position separates them. The $44.99 "Graphics Card BOX" stays
+uncaught, and the honest conclusion is that the discriminator is not in the
+title: the only thing separating it from a real card is its price against
+comps, which is the number being computed.
+
+**And the console keys immediately proved the point about re-reading the
+feed.** Two dock-only listings went straight into the top ten at 84% and 79%,
+because `Video Game Consoles` had never been scannable before and nobody had
+ever looked at what a console comp set contains. `_SUBJECT_ACCESSORY_RE`
+already lists `dock` and could not see them: it anchors to the start of the
+title, and these start with the brand. `_MODEL_THEN_ACCESSORY_RE` catches the
+noun one position later, gated on no inclusion prefix before it and no bundle
+word anywhere. 10 listings, 0.036%, nothing un-flagged.
+
+Both gates came from the probe rather than taste. "Console **with** Dock" is a
+console and "Switch Dock" is a dock, so the joining word decides; and
+"Nintendo Switch 2 Bundle 7 Games Pro Controller" names an accessory with no
+joining word at all while being a $610 console, which is what the bundle gate
+is for.
+
+**The sibling rule was rejected outright, and it is the more interesting
+half.** "X ONLY" reads like an accessory and means the opposite here:
+"Nintendo Switch 2 Console & Joy-Con ONLY" is a $400 console sold without
+games or extras, which is `bare` completeness. A probe found 37 of that shape
+led by real $350-$400 consoles, so `_ANY_ACCESSORY_ONLY_RE` deliberately never
+learns `dock` or `joy-con`. Same word, opposite meanings, decided by which
+noun it attaches to.
+
+**Reading the feed again after that found two more, which is the loop
+working rather than a sign it is broken.** Both were only visible because the
+console keys made a category scannable that never had been.
+
+**A game is not the console it runs on.** 547 Video Games listings keyed as
+`switch`, so every Switch game shared one identity and a $7 budget title
+comped against $60 first-party ones, surfacing at an 82% discount. Naming a
+console in a games category names the **platform**, and a platform is not a
+product identity. This is exactly what `model_key`'s exact match was tightened
+to prevent on 2026-08-01, arriving from the opposite direction: there the
+problem was candidates with no key, here it is candidates whose key is too
+coarse to mean anything. `_console_key` now returns None for games, cases and
+accessory categories, and it is the one family that needs the category.
+
+**`water\s?block` never matched "Water Cooling Block"**, because a word sits
+between the two, and a $350 Bykski block comped against $1,499 cards. The
+probe is the interesting part: nine listings match the wider spelling and
+**eight are real graphics cards sold *with* a block**, up to a $4,999 RTX 5090.
+They are all spared by `_INCLUSION_PREFIX_RE`, which is the entire reason
+widening the spelling is safe here and would not be safe as a standalone rule.
+The one that is not a card has the block in subject position with no joining
+word, the same shape as the console docks above.
+
+**The final feed is clean of everything above, and it exposed the next thing.**
+No accessories, no games, no docks, no multi-variant phones, no auctions, no
+for-parts hardware. What now leads it is six near-identical Ryzen 5 7600X
+listings at $110-$142 against a **$399.99** estimate, and a 7600X does not sell
+for $400.
+
+Reading the comps, which is the whole point of shipping them:
+
+    $399.99   sale 0.90  price 1.00   AMD Ryzen 5 7600X Desktop Processor 4.7GHz 6-Core
+    $399.99   sale 0.90  price 0.90   AMD Ryzen 5 7600X Desktop Processor 4.7GHz 6-Core
+    $135.00   sale 0.90  price 0.90   AMD Ryzen 5 7600X 7000 Series Processor
+
+Nothing is misidentified. All three are genuinely that CPU. Two of them are
+listings that **expired unsold at an absurd asking price**, and with exactly
+three comps the weighted median lands on one of them. This is the upward bias
+`0014` and the README already state in words ("comps are listings that LEFT the
+market, which means sold, expired unsold, or withdrawn"), showing up
+quantitatively for the first time because ADR `0022` made CPUs scannable.
+
+`sale_confidence` cannot help: it scores whether a *disappearance* was a sale,
+and an expired listing is indistinguishable from a sold one. The real lever is
+that **a comp set of exactly three has no resistance to a single bad member**,
+which is the same lesson as `0019` in a different place: a median over three
+values is as fragile as a max over five hundred.
+
+**Measured and deliberately not fixed tonight: multi-model CPU listings.** The
+title "AMD RYZEN 5 3500 3500X 3600 3600X 5500 5600 5600X 5600G 5600GT" is one
+listing offering ten processors at a from-price, which is exactly `0015`'s
+concept in a form no capacity or colour rule can see. 115 listings, **6.67% of
+the CPU category**, and the sample is almost all genuine. But 6.67% is far
+above the low-single-digit rate every accepted rule here has had, and the probe
+already shows a false positive: "Used OEM Dell XPS 17 9710 Motherboard
+i7-11800H RTX 3060 0T0D00" is one motherboard whose part number reads as a
+model. A rule that excludes 6.67% of a category needs the scrutiny the generic
+"Nx" forms got before being rejected at 14.1%, not a pattern written at the end
+of a long session.
+
+**Next:**
+- **Multi-model CPU listings**, per the measurement above: design a pattern that counts CPU models rather than any four-digit token, then probe it for false positives before shipping.
+- **Decide what to do about three-comp estimates.** Two expired-unsold listings out of three set a $399.99 median on a $150 CPU. Options are raising the minimum comp count, a trimmed estimator that needs more than three, or discounting comps whose price is far from the rest of their own key. All three are `0014` changes, not extraction changes.
+- Run the extension against a live page, and verify one cross-source match with a real photo. Both need a person at a browser; nothing in the code blocks either.
+- Deploy the Compose stack to a host. It is verified working; it has no home.
+- Move `ml/similar.py` onto `category_id` once backfill coverage is high.
+- Build the clothing key (`brand + garment type`) per `0021`, now that the mechanism it needed exists.
+
+## 2026-08-10 - The metric was wrong, stage 6 closed, and a category that cannot produce a deal
+
+**Two ADRs were written to fix a number that did not need fixing.** `0013`
+recorded DDR5 desktop memory holding a 19.1x price spread after every filter,
+`0018` named multi-stick kits as the cause, and the corpus measurement showed
+the spread had not moved: median 8.34 before and after, worst 19.64 before and
+after, to two decimal places.
+
+The spread is real. It is also not a property of the comp sets. DDR5 desktop
+32GB reports **42.31x on max/min and 1.83x with the tails trimmed**, and the
+gap is exactly two listings: a $5,500 asking price on a G.SKILL Trident Z5 kit
+that retails near $200, and a $130 single stick. Across every DDR5 bucket the
+median spread goes 8.34 to 2.12 and the worst 19.64 to 3.02.
+
+max/min over any set containing one absurd asking price measures the absurd
+price. eBay always contains absurd asking prices, so on a corpus of this size
+max/min converges on the worst listing present rather than on comp quality.
+Trimmed, DDR5 comp sets are tighter than the 2.74x `0013` reported as a
+success. `ml/measure_kit_rule.py` now prints p90/p10 beside max/min and the
+docstring says which to read; `spread()` itself is unchanged, deliberately,
+because every number in `0012`, `0013` and `0018` is quoted in it and
+redefining it silently would make them incomparable. See `0019`.
+
+**The same defect as the kit rule, in a second place.** Four of the deal
+feed's top twelve were multi-variant iPhone listings that `0015` should have
+caught. `_CAPACITY_RE` needs the unit adjacent to each number, so `8/16/32GB`
+yields the single capacity 32 and `_is_multi_variant` never saw a list to
+count. Identical mechanism to `2x16GB` having no capacity at all, and worse
+here: for a kit it put one product in the wrong bucket, here it hid the signal
+that the listing should not be a comp at all.
+
+`_shared_unit_capacities` reads those lists, gated on **every number being a
+power of two**. That guard is the whole safety argument, not tidiness:
+without it `Apple iPhone 5 / 16GB` reads as `[5, 16]` and `RTX 5080 / 32GB` as
+`[5080, 32]`, and both then look like two-capacity variant listings. Real
+capacities are powers of two, model numbers essentially never are. 81 listings
+(0.31%) newly carry `price_is_from`, all genuine on inspection.
+
+A colour-list rule covers the half no capacity rule can reach (`iPhone 5 /
+16GB ... Black/White/Gold` names one capacity and three phones). Three
+colours, not two, and phones only. Both limits came from probes: two colours
+matches 322 listings led by a $1,499 "CyberPowerPC White/Black RGB Gaming
+Tower", and three still misfires outside phones on a $486 "Nintendo Switch 2
+... Black/Blue/Orange Joy-Cons".
+
+**The kit rule now excludes machines, and that halved its footprint.** The
+memory/storage gate is a gate on words with no opinion about what the listing
+is, so it fired on computers that merely mention their storage: 15 of the 56
+changes were machines, a laptop advertising `128GB RAM 2x2TB SSD` came out at
+4096GB and an HP Z8 at 49152GB, because `_capacity_gb` takes the maximum and
+the drives outranked the number a buyer compares. Gated on
+`_MULTI_COMPONENT_CATEGORIES`, the same component-versus-machine discriminator
+as "no GPU", the rule changes **39 listings, 0.15%, all Memory and SSD**.
+
+**Three probes, two rejected rules, and one correction to what accessories are
+for.** The feed's top entries named three suspects and the corpus killed two.
+A `cooler` accessory noun outside `Cooler Master` hits 40 listings led by a
+$1,800 gaming PC with an AIO cooler and a $1,499 EVGA 3090 "Liquid Cooled". A
+title-final `box` rule excluding with/original/retail hits 112, led by a
+$3,999 4090 "Open Box" and a $1,239 iPhone "Open Box". So the $44.99 "Graphics
+Card BOX" at rank 1 of the feed and the $229 "RTX 5090 COOLER #3" at rank 3
+are still uncaught, for the second and third time respectively.
+
+The correction matters more than the rules. `is_accessory` cannot leak across
+categories on the eBay path at all: `ml/valuation.py` and `ml/match.py` pass
+`category=listing.category` and `ml/similar.py` treats it as a hard `==`. So
+"Video Games", 536 listings and the largest unflagged category, was never
+contaminating console comps. Where it leaks is the **capture path**, where a
+foreign listing has a null category (correctly, per the 2026-08-07 fix) and
+therefore no category filter, making the whole corpus a candidate pool.
+Flagging games would patch that symptom and destroy the ability to value a
+captured game, so it was not done. Three genuine accessory categories were
+added after checking all 33 of their listings by hand ("Bags, Skins & Travel
+Cases", "Original Game Cases & Boxes", "Memory Cards & Expansion Packs"), and
+two were rejected: "CPU Fans & Heat Sinks" holds two real graphics cards out
+of ten, and a 20% false-positive rate is far too high for a rule whose cost is
+deleting price history.
+
+**Stage 6 is closed: the watchlist.** A thin table (`WatchlistItem`, migration
+`0016`) plus `api/routes/watchlist.py` and `frontend/src/Watchlist.jsx`. It
+collects nothing new: `PriceObservation` already records every price change
+and the disappearance check already writes `status`, `missing_since` and both
+confidences. What it adds is a row that outlives the feed, because the feed is
+rebuilt by every scan and a listing whose price rises out of the thresholds
+simply vanishes from it.
+
+`price_when_added` is frozen on the row rather than read from `Listing.price`,
+and a second add returns 409 rather than succeeding, because re-adding would
+reset it and make the price-change column quietly wrong instead of visibly
+absent. Watching enrols a listing in nothing: the obvious next feature is
+"check this one more often", and that would spend eBay calls per watched item
+out of the budget `0003` exists to protect, which is a coverage decision
+disguised as a UI feature.
+
+**Stage 7: two images, a migration gate, and one scheduler.** `infra/` gains
+a two-target Dockerfile, an nginx frontend image, and a Compose stack.
+`runtime` (API, ingest worker, scheduler) is 1.04 GB and verified torch-free
+by importing it; `ml-runtime` adds the ~3 GB CLIP stack for the embedding
+worker alone, which is ADR `0009`'s queue split carried into the images.
+Migrations run as their own one-shot service everything else waits on, so a
+worker cannot come up against a schema its image predates, which is the drift
+that killed ingestion silently three times. The scheduler is pinned to one
+replica explicitly. See `0020`.
+
+Not run in containers, deliberately. The live pipeline holds the same Redis,
+and a second scheduler is the precise failure that cost a day of eBay quota on
+2026-08-07.
+
+**The launcher moved into the repo, where it should have been.** The running
+workers were being started from a shim inside a *previous session's*
+scratchpad directory under `AppData\Local\Temp`, a path nothing in the project
+referenced and nothing guaranteed would survive cleanup. Now
+`systems/rqworker.py` and `scripts/start-local.ps1`, which kills anything
+already running from this repo before starting and derives queue names by
+import.
+
+Restarting exposed the hazard it exists to prevent. A first attempt failed on
+a broken line continuation *after* `Start-Process` had already run, leaving
+four orphans; the next run then found eight processes. Afterwards Redis held
+six worker registrations for two live workers, two of them stuck in `busy`
+with hour-long TTLs, which is a dead worker that looks like a working one.
+Retired by checking each registration's pid against the live process list.
+
+**Stage 6 and 7 aside, the most useful number of the day: 43.7% of active
+listings are ever considered by the deal scan.** 9,490 of 21,716.
+`deal_candidates` requires a `model_key` or `epid` shared with a sold listing,
+and `_model_key` recognises graphics-card chipsets and nothing else, so
+outside GPUs scannability is entirely `epid`. Two thirds of Video Game
+Consoles cannot produce a deal today. This was never written down.
+
+It also answers the clothing question directly, which is `0021`. Used clothing
+is non-catalog, so its `epid` coverage sits near zero and no GPU regex fires
+on it: clothing searches would ingest, hash, embed and extract thousands of
+listings that are structurally incapable of producing a deal, at 12 Browse
+calls/day each forever. The blocker is one field, a `model_key` analogue built
+from brand plus garment type, and the raw material is better there than for
+components because eBay's aspects carry Brand, Size, Colour and Material
+reliably on clothing where they carry capacity on 0.3% of graphics cards.
+
+The uncomfortable half is that `0008` refused Depop as a comp source because
+"item variety is too high for per-item price history to mean anything", and
+that is a claim about item variety rather than about the site. eBay clothing
+has the same variety. eBay earns its place as the price oracle for catalogued
+fungible goods; a used jacket is not interchangeable with anything, and `0014`
+refuses to estimate below three comps.
+
+**Extraction is now in sync with the code**, verified rather than assumed: 324
+rows of `capacity_gb` drift are gone and all five extracted fields report zero
+disagreement across 26,430 listings. Workers were restarted before
+re-extracting, in that order, per the rule this project has learned three
+times.
+
+**Also recorded:** `Mixed Lots` needed nothing, all 121 rows already carry
+`lot_size` via `_LOT_CATEGORY_TOKENS`. And `ml/similar.py`'s hard `==` on
+category already strands 287 listings across 89 categories in pools of under
+20, including locale variants of categories that exist twice
+(`Grafik-/Videokarten`, `CPUs/Prozessoren`, `PC Desktops & All-in-Ones` beside
+`All-In-Ones`). Clothing has far more category names than components do.
+
+442 tests passing (up from 403), mypy clean across 37 source files.
+
+**Re-reading the feed after the fix found three more, which is the method
+working rather than the method failing.** Each was caught by the same habit
+`CLAUDE.md` prescribes: re-run the scan after an extraction change and read the
+top of the list.
+
+**`\bcracked?\b` never matched the word "crack".** It has read that way since
+`0012`, and the `?` binds to the `d` alone, so the pattern matches "cracked"
+and "cracke" and never the bare word sellers overwhelmingly write. "iphone 15
+Plus DOA 256GB Icloud Off | Crack Back Crack Front" reached the feed at a 74.5%
+discount with `has_defect` false, saying "crack" twice.
+
+The correction could not be unconditional. A probe returned 10 titles, 9
+genuinely broken and one a $579.97 phone advertised **"no cracks"**, which is a
+seller volunteering that the item is undamaged. That is the "with Original Box"
+mistake exactly: the word naming a defect is the word used to deny one. So
+`_CRACK_DENIED_RE` is checked first, the same shape as `_INCLUSION_PREFIX_RE`.
+`DOA` went in at the same time; the vocabulary already carried `\bdead\b` and
+had simply never learned the abbreviation.
+
+**"NO RAM/GPU" is the component/machine split in a third word order.** A $59
+"ASUS TUF Gaming GeForce RTX 4090 OC NO RAM/GPU, READ" took rank 1 of the feed
+against a $2,699.99 estimate. `_DEFECT_RE` reads "MISSING CORE",
+`_MISSING_SUFFIX_RE` reads "GPU AND MEMORY MISSING" (added 2026-08-07 for
+exactly this reason), and neither reads "NO RAM". `_MISSING_COMPONENT_RE`
+already matched all three phrasings and was only ever consulted for
+completeness, because for a *machine* a missing part is a working reduced
+configuration.
+
+Gated on component category **and** no whole-machine word in the title, it
+matches 6 listings, of which 5 are stripped cards and empty retail boxes. The
+sixth is the reason for the second clause: an $800 "gaming computer desktop
+... rtx 3060 ... no ram" that a seller filed under a component category. Net
+35 listings newly defective across the corpus, 0.131%, nothing un-flagged.
+
+**And extraction was structurally one step behind reality.** After
+re-extracting to zero drift, 74 rows (0.28%) drifted again within the hour, all
+with capacity derivable only from `aspects`. The cause is an ordering nobody
+had written down: `aspects` is a **getItem-only** field, so a listing is
+ingested and extracted with no aspects at all and only learns them when the
+disappearance check harvests its body, hours or days later. Nothing re-extracts
+it, because `extract_all(only_new=True)` keys on `variant_signals IS NULL` and
+that row was extracted long ago.
+
+So every listing whose capacity lives only in eBay's structured aspects, which
+is 99% of phones and consoles, sat permanently with `capacity_gb = NULL` unless
+somebody ran a full re-extraction by hand. That is not a mechanism. The
+disappearance check now re-derives the extracted fields immediately after
+enriching, where the new input arrives; extraction is regex over a title
+against a network round-trip already paid for.
+
+**Next:**
+- Deploy the Compose stack to an actual host, which is all that is left of stage 7.
+- Build the clothing `model_key` analogue from eBay aspects, per `0021`, before adding any clothing search.
+- Re-read every spread number in `0012`, `0013` and `0018`: they are all max/min.
+- The extension still has never run against a live page, and no cross-source match has been verified with a real photo.
+
+## 2026-08-10 - The kit rule measured at last, and the categories the extractor never asked
+
+**`ml/measure_kit_rule.py` finally ran against a real corpus, and the rule
+passes the test it was given while failing the problem it was written for.**
+ADR `0018` shipped unvalidated because the database was on the other machine.
+It is on this one now, 26,403 listings.
+
+Change rate: **56 listings, 0.21%**. The pass criterion was low single digits
+and double digits meant withdrawal, so the rule stays. The affected categories
+are the right ones (36 Memory (RAM), 12 PC Desktops, 3 Laptops, 3 SSDs).
+
+The second question got the uncomfortable answer. DDR5 desktop memory's price
+spread is **unchanged**: median within-bucket 8.34 before and after, worst
+19.64 before and after, overall 51.21 before and after. Only the ungrouped
+count moved, 23 to 21. Two listings. The spread `0013` named and `0018` aimed
+at is still there, and multi-stick kits sitting in the unstated bucket were not
+its cause. The rule is a correct fix for a real defect that turns out not to be
+the defect being chased, which is worth separating from a rule that works.
+
+**A quarter of the changes are not memory kits at all.** 15 of 56 are whole
+machines, where the rule totals a storage pair and `_capacity_gb` takes the
+max:
+
+| stored | after | title |
+|---|---|---|
+| 128GB | 4096GB | `MSI Titan 18 HX ... RTX 4090 128GB RAM 2x2TB SSD` |
+| 64GB | 2048GB | `Lenovo Legion Pro 7 ... 64GB DDR5 RAM 1TBx2 SSD` |
+| 1024GB | 3072GB | `Lot of 3 x 1TB NVMe SK hynix / WD` |
+
+The memory/storage gate is doing its job on vocabulary and has no opinion about
+whether the listing is a component or a machine, so a laptop's capacity becomes
+its SSD total and outranks its RAM. The third row is a lot, excluded from comps
+anyway, but it shows the kit and lot readings colliding on the same title.
+
+**Stored extraction has drifted from the code by 1.23%.** `capacity_gb`
+disagrees on 324 rows, which is the kit rule not yet applied to rows ingested
+before it. `lot_size`, `has_defect` and `model_key` are at zero, so re-running
+extraction is a capacity-only pass. Workers restart first, per the rule this
+project has now learned three times.
+
+**Three corpus probes, and two of the three rules they were testing are dead.**
+The top of the deal feed is still an audit of the extractor, and it named three
+suspects. Measured before writing anything:
+
+- **`cooler` as an ungated accessory noun**: 40 listings, and the expensive end
+  is real product. A $1,800 gaming PC with an AIO cooler, a $1,499 EVGA 3090
+  Hybrid "Liquid Cooled", a $680 Ryzen "with Cooler". Rejected. `cooler` is
+  correctly in the `_FOR_RE`-gated list and belongs there; `ASUS ROG Astral
+  RTX 5090 COOLER #3` at $229.99 needs a trailing-subject-noun discriminator,
+  not a vocabulary entry.
+- **title ending in `box`, excluding "with/original/retail"**: 112 listings,
+  led by a $3,999 4090 "Open Box" and a $1,239 iPhone "Open Box", plus "NO
+  BOX", "In Box", "sealed in Box". Rejected for the second time, on new
+  evidence: the 2026-08-07 probe found "with Original Box", and the condition
+  vocabulary around "box" is wider than that. The $44.99 `Graphics Card BOX`
+  sitting at rank 1 of the feed stays uncaught.
+- **multi-capacity slash titles** (`8/16/32GB`, `16/64GB`): 214 listings,
+  0.81%, and this one survives. Only 96 of the 190 active ones carry
+  `price_is_from`, so ADR `0015`'s mechanism is missing roughly half of them.
+  Four of the feed's top twelve are iPhone 5/5C listings of exactly this shape,
+  priced at the cheapest variant. A title naming several capacities in a slash
+  list is a variant listing whether or not eBay flagged the price.
+
+**The largest comp contamination found is a category the taxonomy already
+names.** `_ACCESSORY_CATEGORY_TOKENS` is exact where it applies: Chargers &
+Charging Docks 34/34, Controllers & Attachments 107/107, Cases Covers & Skins
+41/41, Water Cooling 64/64, Video Card/GPU Cooling 112/112. **`Video Games` is
+399 active listings with 1 flagged**, average price $103.45, against Video Game
+Consoles at $197.40. A Switch game is not a Switch. `Mixed Lots` is 104
+listings with 0 flagged, and the category states outright what `lot_size` tries
+to read out of the title. Both are token additions to a list, with no regex
+risk, which is the mechanism `CLAUDE.md` says to prefer over title vocabulary.
+
+Of 505 active listings whose title contains "case", 55 read as accessories and
+114 are under $120, led by carrying cases, game cases and boxed games.
+
+**The corpus is eight days old, and nothing says why.** Minimum `first_seen_at`
+is 2026-08-25 17:38, with 10,495 rows arriving on 08-26. The 19,996 listings
+this log last counted are gone, and with them the disappearance history that
+had been accumulating since June. `.env` records eBay moving to production
+credentials on 2026-08-26 with the sandbox keyset commented out, which is the
+obvious occasion for a rebuild and a defensible one, since sandbox item ids
+mean nothing in production. It is not recorded anywhere. Neither is the capture
+end-to-end exercise of 2026-08-27, whose four synthetic Depop rows are still in
+the table; the earliest of them still carries `category='Nintendo'`, the shape
+of the bug fixed on 08-07, and the ones five minutes later do not, so a stale
+API process was found and restarted during that session too.
+
+4,670 of 26,403 listings are `likely_sold` after eight days, which is a
+plausible rate and a young comp pool.
+
+**Environment drift.** `UV_PROJECT_ENVIRONMENT` is `C:\venvs\deal-finder`, not
+the `C:\venvs\undercut` this file and `CLAUDE.md` both claim. The workers and
+scheduler are running from a shim inside a *previous session's* scratchpad
+directory under `AppData\Local\Temp`, which is not a location that survives
+cleanup; the shim belongs in the repo. `infra/docker-compose.yml` still names
+the database, user and password `dealfinder`, which the live `DATABASE_URL`
+depends on, so it is consistent rather than broken and renaming it would orphan
+the volume. The 4.6 GB stale in-repo `.venv` is still there.
+
+403 tests passing. Scheduler heartbeat 25s, all four tasks enqueuing, ingest
+and disappearance check on their 74-minute cadence, budget 3,568 of 5,000 calls
+a day across 64 enabled searches.
+
+**Next:**
+- Add `video games` and `mixed lots` to `_ACCESSORY_CATEGORY_TOKENS`, re-measure.
+- Detect slash-variant titles and set `price_is_from`, extending ADR `0015`.
+- Restart workers, then re-run extraction for the 324 capacity rows.
+- Find the real cause of the DDR5 51x spread, now that kits are ruled out.
+- Record 2026-08-26 and 2026-08-27 properly, or accept the gap in writing.
+
 ## 2026-08-07 - The capture path could not have matched anything, and a kit was not a capacity
 
 **The browser extension would have returned "no match" for every listing it

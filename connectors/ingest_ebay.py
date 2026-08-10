@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from functools import partial
 
 import httpx
@@ -59,7 +59,7 @@ def _refresh_from_summary(existing: Listing, fresh: Listing) -> None:
     # Re-derived rather than copied, because a seller revising a title from
     # "Console" to "Console ONLY" changes what is being sold, and a stale
     # classification would quietly keep it in the wrong comp set.
-    variant = extract_variant(fresh.title, existing.aspects, fresh.category)
+    variant = extract_variant(fresh.title, existing.aspects, fresh.category, fresh.condition)
     existing.title = fresh.title
     existing.lot_size = variant.lot_size
     existing.completeness = variant.completeness
@@ -163,7 +163,7 @@ def ingest_saved_search(
     client = client or EbayClient()
     db_engine = db_engine or default_engine
     search = client.search_items(saved_search.keyword)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     result = IngestResult(searches_run=1)
     if search.total > len(search.items):
@@ -231,7 +231,9 @@ def ingest_saved_search(
                 session.add(existing)
                 result.updated += 1
             else:
-                variant = extract_variant(listing.title, listing.aspects, listing.category)
+                variant = extract_variant(
+                    listing.title, listing.aspects, listing.category, listing.condition
+                )
                 listing.lot_size = variant.lot_size
                 listing.completeness = variant.completeness
                 listing.has_defect = variant.has_defect
@@ -349,9 +351,9 @@ def ingest_all(
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    started = datetime.now(timezone.utc)
+    started = datetime.now(UTC)
     result = ingest_all()
-    elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+    elapsed = (datetime.now(UTC) - started).total_seconds()
     print(
         f"Ran {result.searches_run} searches in {elapsed:.0f}s: "
         f"{result.inserted} new, {result.updated} updated, "

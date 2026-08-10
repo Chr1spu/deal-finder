@@ -116,6 +116,32 @@ _DEFECT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# eBay states this outright, in a column, and nothing read it until
+# 2026-08-10.
+#
+# `condition` is a structured field stored since migration 0001. The value
+# "For parts or not working" is eBay's own enum, set by the seller in a
+# dropdown, and it is exactly what _DEFECT_RE spends dozens of regex
+# alternatives trying to infer from prose. 1,668 listings carry it and 485 of
+# them had has_defect false, because their titles never said so: the title
+# vocabulary catches 71% of a population the structured field identifies
+# perfectly.
+#
+# Found by asking why a "PNY RTX 4090 Verto 24gb" was sitting in the deal feed
+# at $107.87 against a $2,699.99 estimate with no signal in its title at all.
+# Its condition column read "For parts or not working" the whole time.
+#
+# Locale variants included because eBay returns condition in the seller's
+# language, the same way it returns category names (see ADR 0021): the corpus
+# holds "Per parti di ricambio o non funzionante" and "Als Ersatzteil / defekt".
+# This is the same argument as CLAUDE.md's "prefer eBay's category taxonomy
+# over title vocabulary", applied to a second structured field.
+_CONDITION_DEFECT_RE = re.compile(
+    r"for\s+parts|not\s+working|nicht\s+funktionsf|ersatzteil|defekt"
+    r"|ricambio|non\s+funzionante|pi[eè]ces\s+d[eé]tach",
+    re.IGNORECASE,
+)
+
 # A machine sold without some of its components. NOT a defect: an HP Z8
 # workstation listed "NO GPU" and a laptop listed "NO MEM NO HDD" are working
 # machines in a reduced configuration, and calling them broken flagged real
@@ -167,6 +193,34 @@ _READ_RE = re.compile(r"\bread\s*(?:description|desc|details|carefully|first|bel
 # included") is harder than everything else here and is not needed to capture
 # most of the value. See the Consequences section of ADR 0012.
 _NEGATION_RE = re.compile(r"\b(?:no|without|missing|lacks?)\s+(\w+(?:\s+\w+)?)", re.IGNORECASE)
+
+# Cracks, and the reason this is not simply another alternative inside
+# _DEFECT_RE.
+#
+# _DEFECT_RE has read `\bcracked?\b` since ADR 0012, which looks like it means
+# "crack or cracked" and does not: the `?` binds to the `d` alone, so the
+# pattern matches "cracked" and "cracke" and never the bare word. Sellers
+# overwhelmingly write the bare word. "iphone 15 Plus DOA 256GB Icloud Off |
+# Crack Back Crack Front" reached the deal feed at a 74.5% discount with
+# has_defect false, and it says "crack" twice.
+#
+# Corrected here rather than in place because the fix cannot be unconditional.
+# A corpus probe returned 10 matching titles, 9 genuinely broken and one a
+# $579.97 phone advertised "no cracks", which is a seller volunteering that
+# the item is *undamaged*. Flagging it would be the "with Original Box"
+# mistake again: the word that names a defect is also the word used to deny
+# one. Same shape as _INCLUSION_PREFIX_RE, and handled the same way.
+_CRACK_RE = re.compile(r"\bcrack(?:s|ed|ing)?\b", re.IGNORECASE)
+_CRACK_DENIED_RE = re.compile(
+    r"\b(?:no|zero|without|free\s+of|nil)\b[^,|]{0,20}\bcrack(?:s|ed|ing)?\b"
+    r"|\bcrack(?:s|ing)?\s*[-]?\s*free\b",
+    re.IGNORECASE,
+)
+
+# "DOA" is dead on arrival, and it is unambiguous in this corpus: the
+# vocabulary already carries `\bdead\b` and simply never learned the
+# abbreviation. One listing today, which is the usual size of these rules.
+_DOA_RE = re.compile(r"\bDOA\b|\bdead\s+on\s+arrival\b", re.IGNORECASE)
 
 # --- lots -------------------------------------------------------------------
 
@@ -249,7 +303,12 @@ _STRONG_ACCESSORY = (
     # heat sinks were dropped from this list by accident when the box terms
     # came out, and the deal feed surfaced it within minutes: a "Video
     # Heatsink Fan" at $79.99 ranked as a 91% discount against a $900 card.
-    r"backplates?|back\s?plates?|heat\s?sinks?|shrouds?|water\s?blocks?|waterblocks?|"
+    # "Water Cooling Block" has a word between "water" and "block", so
+    # `water\s?block` never matched it and a $350 Bykski block comped
+    # against $1,499 cards. The eight real cards sold *with* a block are
+    # spared by _INCLUSION_PREFIX_RE below, which is why widening the
+    # spelling is safe here and would not be on its own.
+    r"backplates?|back\s?plates?|heat\s?sinks?|shrouds?|water\s*(?:cooling\s+)?blocks?|waterblocks?|"
     r"nvlink|cooling\s?fans?|fan\s?assembly|thermal\s?pads?|empty\s+box|shell|"
     # "Replacement Fans (Set of 3)". Deliberately NOT bare "fan": "3 fan" and
     # "triple fan" describe a real card's own cooler and are extremely common
@@ -280,6 +339,15 @@ _STRONG_ACCESSORY_RE = re.compile(rf"\b(?:{_STRONG_ACCESSORY})\b", re.IGNORECASE
 # *second* "only" after it, so "Retail Box ONLY" never matched.
 _ACCESSORY_ONLY_VOCAB = (
     rf"{_STRONG_ACCESSORY}|box|case|cover|packaging|manual|guide|cable|bracket"
+)
+
+# Empty packaging written without the word "only". See _is_accessory for the
+# measurement; the two halves are deliberately both required.
+_PACKAGING_NOUN_RE = re.compile(r"\b(?:box|boxed|packaging|wafer|carton)\b", re.IGNORECASE)
+_ABSENT_CONTENTS_RE = re.compile(
+    r"\b(?:no|without|excludes?)\s+(?:cpu|gpu|processor|graphics\s*card|chip|drive|ssd)\b"
+    r"|\bnot\s+included\b",
+    re.IGNORECASE,
 )
 # Both word orders. Sellers write "Heatsink ONLY" and "ONLY Cooling System"
 # interchangeably, and matching only the first let the second straight
@@ -318,6 +386,32 @@ _SUBJECT_ACCESSORY_RE = re.compile(
     r"|pcb)\b", re.IGNORECASE
 )
 
+# The same idea one position later: the product name comes first and the
+# accessory noun follows it directly. "Nintendo Switch Dock Home Console Black
+# TV Docking USB-C HDMI" is a $19.99 dock, and `_SUBJECT_ACCESSORY_RE` cannot
+# see it because the title does not *start* with the noun, it starts with the
+# brand.
+#
+# Only became visible when ADR 0022 gave consoles a model_key, which made the
+# category scannable for the first time and put two dock-only listings straight
+# into the feed's top ten at 84% and 79% discounts.
+#
+# Two gates, both load-bearing, both from the probe. `_INCLUSION_PREFIX_RE`
+# before the noun separates "Console **with** Dock" from "Switch Dock", and
+# `_BUNDLE_RE` anywhere in the title spares "Nintendo Switch 2 Bundle 7 Games
+# Pro Controller", which names an accessory with no joining word at all and is
+# a $610 console.
+_MODEL_THEN_ACCESSORY_RE = re.compile(
+    r"\b(?:nintendo\s+)?switch(?:\s*2)?(?:\s+(?:oled|lite))?\s+"
+    r"(dock|docking\s+station|joy[\s-]?cons?|pro\s+controller|charging\s+(?:dock|stand|grip))\b",
+    re.IGNORECASE,
+)
+# Deliberately NOT a rule: "X ONLY" for console parts. It reads as an accessory
+# and means the opposite. "Nintendo Switch 2 Console & Joy-Con ONLY" is a $400
+# console being sold without games or extras, which is `bare` completeness, and
+# a probe found 37 listings of that shape led by real $350-$400 consoles.
+# `_ANY_ACCESSORY_ONLY_RE` therefore does not learn `dock` or `joy-con`.
+
 # --- specs ------------------------------------------------------------------
 
 # Largest capacity mentioned, normalized to GB. Titles list several ("64GB RAM
@@ -328,6 +422,49 @@ _CAPACITY_RE = re.compile(r"\b(\d{1,5})\s*(GB|TB)\b", re.IGNORECASE)
 # legitimately has 100TB, and "PC5-38400" style codes are excluded by requiring
 # the GB/TB suffix anyway.
 MAX_PLAUSIBLE_CAPACITY_GB = 100_000
+
+# A slash-joined list of capacities sharing ONE trailing unit: "8/16/32GB".
+#
+# Exactly the defect ADR 0018 fixed for kits, in a second place. _CAPACITY_RE
+# needs the unit adjacent to each number, so "8/16/32GB" yields the single
+# capacity 32 and the 8 and the 16 are invisible. For a kit that put one
+# product in the wrong bucket; here it does something worse, because this is
+# how sellers write a *variant list*. "Apple iPhone 5C UNlocked 8/16/32GB" is
+# three phones at three prices showing the cheapest, and reading one capacity
+# meant _is_multi_variant never saw a list to count. Those listings sat near
+# the top of the deal feed, which is precisely what ADR 0015 exists to stop.
+_SHARED_UNIT_CAPACITY_RE = re.compile(
+    r"\b(\d{1,4})((?:\s*/\s*\d{1,4})+)\s*(GB|TB)\b", re.IGNORECASE
+)
+
+
+def _is_power_of_two(value: int) -> bool:
+    return value >= 4 and (value & (value - 1)) == 0
+
+
+def _shared_unit_capacities(title: str) -> set[int]:
+    """Capacities from a slash list sharing one trailing unit, in GB.
+
+    Every number in the list must be a power of two, and that guard is the
+    whole safety argument rather than a tidiness check. Without it the pattern
+    reads a product name as a capacity: "Apple iPhone 5 / 16GB" becomes
+    [5, 16] and "RTX 5080 / 32GB" becomes [5080, 32], both of which would then
+    look like two-capacity variant listings. Real storage sizes are powers of
+    two; model numbers essentially never are. Measured on the corpus: 171
+    titles match with the guard, and every sampled one is a genuine variant
+    list.
+    """
+    found: set[int] = set()
+    for match in _SHARED_UNIT_CAPACITY_RE.finditer(title):
+        numbers = [int(match.group(1))]
+        numbers += [int(n) for n in re.findall(r"\d+", match.group(2))]
+        if not all(_is_power_of_two(n) for n in numbers):
+            continue
+        multiplier = 1024 if match.group(3).upper() == "TB" else 1
+        values = [n * multiplier for n in numbers]
+        if all(0 < v <= MAX_PLAUSIBLE_CAPACITY_GB for v in values):
+            found.update(values)
+    return found
 
 # A memory kit: "2x16GB", "4 x 8GB", "16GB x 2".
 #
@@ -395,9 +532,58 @@ _GPU_MODEL_RE = re.compile(
     r"\b(RTX|GTX|RX)[^\w\s]*\s*-?\s*(\d{3,4})\s*(Ti\s*SUPER|Ti|XTX|XT|SUPER)?\b",
     re.IGNORECASE,
 )
-_CPU_MODEL_RE = re.compile(
-    r"\b(?:Ryzen\s+\d\s+)?(\d{4,5}[A-Z]{0,3})\b(?=.*\b(?:Ryzen|Core|i[3579]|Threadripper)\b)"
-    r"|\b(i[3579])[\s-](\d{4,5}[A-Z]{0,2})\b",
+# Processors. This replaces a version that was written, never called, and
+# wrong in a way that only measurement showed: its lookahead required a CPU
+# word to appear *after* the model number, but sellers write "AMD Ryzen 9
+# 5900X" with the word first. It matched at all only when a title happened to
+# say "12-Core" later on. Wired up and corrected, coverage of the CPU category
+# goes from 53.7% to 89.0%.
+#
+# Context first, then the number, which is the same shape _form_factor uses:
+# a bare four-digit number is a year, a wattage or a model of something else.
+_CPU_CONTEXT_RE = re.compile(
+    r"\b(?:ryzen|threadripper|core\s+i[3579]|intel\s+core|processor|cpu)\b", re.IGNORECASE
+)
+_CPU_INTEL_RE = re.compile(r"\b(i[3579])[\s-]*(\d{4,5})([A-Z]{0,2})\b", re.IGNORECASE)
+_CPU_AMD_RE = re.compile(
+    r"\bryzen\s+(?:\d\s+)?(\d{4})\s*(x3d|xt|x|g|ge)?\b"
+    r"|\b(\d{4})(x3d|xt|x|g)\b(?=.*\bryzen\b)",
+    re.IGNORECASE,
+)
+
+# Consoles. The model is the spec here exactly as it is for a graphics card,
+# and the vocabulary is tiny and stable. 99.0% of the console category keys,
+# and the within-key price spread is 1.88x against 4.00x for the category as a
+# whole. The 1% that does not key is almost entirely sellers filing something
+# else here: an N64, a PS Vita, a gaming PC, a graphics card.
+#
+# Order matters inside this pattern. "Nintendo Switch OLED" contains
+# "Nintendo Switch", so the qualified forms have to be tried before the bare
+# one or every OLED and Lite would collapse into `switch`, which is a $200
+# product and a $120 product filed as a $150 one.
+_CONSOLE_MODEL_RE = re.compile(
+    r"\b(?:nintendo\s+)?switch\s*(2)\b"
+    r"|\b(?:nintendo\s+)?switch\s+(oled|lite)\b"
+    r"|\b(oled|lite)\s+(?:nintendo\s+)?switch\b"
+    r"|\b(?:nintendo\s+)?(switch)\b"
+    r"|\bplaystation\s*(5|4)\b|\bps\s*(5|4)\b"
+    r"|\bxbox\s+series\s*([sx])\b"
+    r"|\bxbox\s+(one)\b",
+    re.IGNORECASE,
+)
+
+# Phones. The most regular vocabulary of the four: 99.3% of the category keys,
+# within-key spread 1.58x against 3.08x category-wide.
+#
+# The "e" branch comes first because "iPhone 16e" contains "iPhone 16", and
+# they are different products at different prices. Same ordering hazard as
+# the console pattern above.
+_PHONE_MODEL_RE = re.compile(
+    r"\biphone\s*\(?(\d{1,2})\)?\s*(e)\b"
+    r"|\biphone\s*\(?(\d{1,2})\)?\s*(pro\s*max|pro|plus|mini|max)?\b"
+    r"|\biphone\s+(se\s*\d?|air|xs\s*max|xr|xs|x)\b"
+    r"|\bgalaxy\s+([sznf])\s*(\d{1,2})\s*(ultra|plus|\+|fe)?\b"
+    r"|\bpixel\s+(\d{1,2})\s*(pro\s*xl|pro|xl|a)?\b",
     re.IGNORECASE,
 )
 
@@ -437,7 +623,40 @@ _ACCESSORY_CATEGORY_TOKENS = (
     "mount",
     "bracket",
     "tools",
+    # Added 2026-08-10 after reading the corpus by category rather than by
+    # title. Each is an accessory *class* in eBay's own taxonomy and none was
+    # reachable from the tokens above: "Bags, Skins & Travel Cases" does not
+    # contain "cases, covers". Every listing in all three was checked by hand,
+    # 33 of them, and none is the product it sits beside.
+    "travel cases",
+    "bags, skins",
+    "game cases",
+    "memory cards",
 )
+# Two more were probed and rejected, which is the more useful half of the
+# exercise. "CPU Fans & Heat Sinks" holds ten listings, eight of them genuine
+# heatsinks and two of them real graphics cards a seller filed in the wrong
+# place (a $260 RTX 3070, a $240 RTX 3060 Ti). A 20% false-positive rate is
+# far too high for a rule that *excludes* listings, because the cost is
+# deleting real price history rather than showing one bad feed entry. "Laptop
+# Docking Stations" holds six eGPU enclosures, which are products in their own
+# right, and fails the same test "Video Games" does below.
+# Deliberately NOT in that list: "Video Games", 536 listings, the largest
+# unflagged category by a wide margin.
+#
+# A game is not an accessory to a console, it is a different product, and the
+# tokens above all name accessory classes. On the eBay path it also changes
+# nothing: ml/valuation.py and ml/match.py pass `category=listing.category`
+# and ml/similar.py treats that as a hard `==` filter, so a game can never
+# enter a console's comp set however it is flagged.
+#
+# Where it does leak is the capture path, where a foreign listing has a null
+# category (correctly, per the 2026-08-07 fix) and therefore no category
+# filter at all, making the entire corpus a candidate pool. Calling games
+# accessories would patch that one symptom while destroying the ability to
+# value a captured game at all. The real gap is that captures have no
+# category, and that is a design problem to solve rather than paper over.
+# See docs/decisions/0021-what-breaks-outside-pc-hardware.md.
 # eBay's own name for a multi-item listing.
 _LOT_CATEGORY_TOKENS = ("mixed lots", "bulk lots")
 
@@ -472,6 +691,30 @@ _MULTI_COMPONENT_CATEGORIES = (
 # title can only mean two variants on offer.
 _SINGLE_CAPACITY_CATEGORIES = ("cell phones", "smartphones", "consoles", "tablets")
 
+# A slash-joined run of colour words: "Black/White/Gold".
+#
+# The other half of how sellers write a variant list, and the half no capacity
+# rule can reach: "Apple iPhone 5 / 16GB Factory UNlocked Black/White/Gold"
+# names one capacity and three phones.
+_COLOUR = (
+    r"black|white|gold|silver|blue|red|green|pink|purple|yellow|gray|grey|"
+    r"rose|graphite|midnight|starlight|titanium|orange|lavender|coral|teal|"
+    r"violet|bronze|copper|cream|beige|navy|mint"
+)
+# THREE, not two, and only in phone-shaped categories. Both limits came out of
+# a corpus probe rather than taste. Two colours joined by a slash is usually
+# one two-tone object: a "CyberPowerPC White/Black RGB Gaming Tower" at $1,499
+# and an "NZXT H510 ... White/Black Tempered Glass" at $850 are single
+# products, and 322 listings match at two. Three still false-positives outside
+# phones, where a "Nintendo Switch 2 Console ... Black/Blue/Orange Joy-Cons"
+# at $486 is one console with multicoloured controllers. Restricted to
+# _SINGLE_CAPACITY_CATEGORIES-style phone categories the pattern is clean:
+# every one of the sampled matches is a genuine multi-variant phone listing.
+_COLOUR_LIST_RE = re.compile(
+    rf"\b(?:{_COLOUR})\b\s*/\s*(?:{_COLOUR})\b\s*/\s*(?:{_COLOUR})\b", re.IGNORECASE
+)
+_COLOUR_LIST_CATEGORIES = ("cell phones", "smartphones", "mobile phones")
+
 # Three or more distinct capacities is a variant list anywhere except a
 # multi-component machine. Two is only conclusive where there is one capacity
 # dimension: "Intel 32GB/1024GB NVMe SSD" is a hybrid Optane drive, not a
@@ -480,7 +723,7 @@ MIN_CAPACITIES_FOR_VARIANT_LIST = 3
 
 
 def _distinct_capacities(title: str) -> set[int]:
-    found: set[int] = set()
+    found: set[int] = _shared_unit_capacities(title)
     for match in _CAPACITY_RE.finditer(title):
         try:
             value = int(match.group(1))
@@ -502,6 +745,11 @@ def _is_multi_variant(title: str, category: str | None) -> tuple[bool, str | Non
     lowered = (category or "").lower()
     if any(token in lowered for token in _MULTI_COMPONENT_CATEGORIES):
         return False, None
+
+    if any(token in lowered for token in _COLOUR_LIST_CATEGORIES):
+        colours = _COLOUR_LIST_RE.search(title)
+        if colours:
+            return True, f"colours offered: {colours.group(0).strip()}"
 
     capacities = _distinct_capacities(title)
     if len(capacities) >= MIN_CAPACITIES_FOR_VARIANT_LIST:
@@ -541,6 +789,26 @@ def _is_accessory(title: str, category: str | None = None) -> tuple[bool, str | 
     if only:
         return True, only.group(0).strip()
 
+    # Empty packaging, in the form that does not say "only".
+    #
+    # Found by the ADR 0019 re-audit, as the one comp group whose spread
+    # survived trimming: PC Desktops keyed `i9-12900k` sat at 164x p90/p10
+    # across ten listings, and two of them were empty retail boxes at $20.89
+    # and $31.50 in a group whose median is $1,300.
+    #
+    # `_ANY_ACCESSORY_ONLY_RE` already catches "Retail Box ONLY". These say it
+    # the other way: a packaging noun plus the explicit absence of the thing
+    # that belongs in it. Unlike _MISSING_COMPONENT_RE this needs no category
+    # gate, because the combination is unambiguous in a way "no CPU" alone is
+    # not: a barebones machine is sold without a processor all the time, but
+    # nobody describes a machine as a "Box Wafer NO CPU INCLUDED".
+    #
+    # Three listings corpus-wide, 0.011%, all genuine, no false positives. One
+    # of them reads "EMPTU Box", so the rule cannot lean on the word "empty".
+    empty_packaging = _PACKAGING_NOUN_RE.search(title) and _ABSENT_CONTENTS_RE.search(title)
+    if empty_packaging:
+        return True, _ABSENT_CONTENTS_RE.search(title).group(0).strip()  # type: ignore[union-attr]
+
     # A strong accessory noun beside a named model: the title says both what
     # product it relates to and that it is a part of it. No gate word needed,
     # and requiring one missed most real cases.
@@ -549,7 +817,7 @@ def _is_accessory(title: str, category: str | None = None) -> tuple[bool, str | 
     # Edition With EKWB Waterblock" is a $4,999 graphics card that comes with
     # a waterblock; "GPU Cooling Fan" is a fan. The preceding word decides,
     # and getting this backwards flagged real $1,800-$5,000 cards as parts.
-    if _model_key(title) or _FOR_RE.search(title):
+    if _model_key(title, category) or _FOR_RE.search(title):
         for strong in _STRONG_ACCESSORY_RE.finditer(title):
             # 32 rather than 22: sellers put a brand between the joiner and
             # the noun, and "GPU with EK Quantum Vector Water Block" needs 23
@@ -566,10 +834,18 @@ def _is_accessory(title: str, category: str | None = None) -> tuple[bool, str | 
     if subject and _FOR_RE.search(title):
         return True, subject.group(0).strip()
 
+    # The accessory noun directly after the product name, with nothing making
+    # it an inclusion and no bundle anywhere. See _MODEL_THEN_ACCESSORY_RE.
+    following = _MODEL_THEN_ACCESSORY_RE.search(title)
+    if following and not _BUNDLE_RE.search(title):
+        preceding = title[: following.start(1)]
+        if not _INCLUSION_PREFIX_RE.search(preceding):
+            return True, following.group(1).strip()
+
     return False, None
 
 
-def _kit_capacities(title: str) -> list[tuple[int, int]]:
+def _kit_capacities(title: str, category: str | None = None) -> list[tuple[int, int]]:
     """(module count, kit total in GB) for every kit expression in the title.
 
     Returns an empty list for a single stick, which is the common case.
@@ -579,7 +855,22 @@ def _kit_capacities(title: str) -> list[tuple[int, int]]:
     graphics cards, not a 48GB kit, and reading it as one would file the
     listing under a capacity no card has, quietly leaving it with no comps at
     all. Only things sold as matched modules get totalled.
+
+    Gated on category as well, which the corpus measurement of 2026-08-10
+    forced. The context gate above is a gate on *words*, and it has no opinion
+    about what kind of thing the listing is, so it fired on whole machines
+    that merely mention their storage: 15 of the 56 listings the kit rule
+    changed were computers, and because _capacity_gb takes the maximum, a
+    laptop advertising "128GB RAM 2x2TB SSD" came out at 4096GB and an "HP Z8
+    ... 128GB 3 X 16TB SAS" at 49152GB. Its SSDs outranked the number a buyer
+    would compare. A machine's drives are components inside a product, not
+    modules of it, so the kit reading is simply wrong there. This is the same
+    component-versus-machine discriminator as "no GPU" and _MISSING_SUFFIX_RE,
+    reused rather than reinvented.
     """
+    lowered = (category or "").lower()
+    if any(token in lowered for token in _MULTI_COMPONENT_CATEGORIES):
+        return []
     if not _COMPONENT_CONTEXT_RE.search(title):
         return []
 
@@ -602,7 +893,7 @@ def _kit_capacities(title: str) -> list[tuple[int, int]]:
     return kits
 
 
-def _capacity_gb(title: str) -> int | None:
+def _capacity_gb(title: str, category: str | None = None) -> int | None:
     """Largest plausible capacity in the title, normalized to GB.
 
     A kit counts as its total. "2x16GB" is 32GB of memory, and reading it as
@@ -611,7 +902,7 @@ def _capacity_gb(title: str) -> int | None:
     kit listed as "2x16GB" landed among single 16GB sticks at half the price.
     """
     best: int | None = None
-    for _, total in _kit_capacities(title):
+    for _, total in _kit_capacities(title, category):
         best = total if best is None else max(best, total)
     for match in _CAPACITY_RE.finditer(title):
         try:
@@ -655,21 +946,146 @@ def _form_factor(title: str) -> str | None:
     return None
 
 
-def _model_key(title: str) -> str | None:
-    """A normalized chipset identifier, where the model is the spec.
+def _normalize_key_part(value: str) -> str:
+    return re.sub(r"\s+", "", value).lower().replace("+", "plus")
 
-    Graphics cards group cleanly by this: rtx-4090 medians $2,775 against
-    rtx-4070-super at $652. Returns None outside the categories the vocabulary
-    covers, which is most of the corpus and is the honest answer.
-    """
-    gpu = _GPU_MODEL_RE.search(title)
-    if gpu:
-        family, number, suffix = gpu.group(1), gpu.group(2), gpu.group(3)
-        parts = [family.lower(), number]
-        if suffix:
-            parts.append(re.sub(r"\s+", "", suffix).lower())
-        return "-".join(parts)
+
+def _gpu_key(title: str) -> str | None:
+    match = _GPU_MODEL_RE.search(title)
+    if not match:
+        return None
+    family, number, suffix = match.group(1), match.group(2), match.group(3)
+    parts = [family.lower(), number]
+    if suffix:
+        parts.append(_normalize_key_part(suffix))
+    return "-".join(parts)
+
+
+def _cpu_key(title: str) -> str | None:
+    if not _CPU_CONTEXT_RE.search(title):
+        return None
+    intel = _CPU_INTEL_RE.search(title)
+    if intel:
+        return f"{intel.group(1)}-{intel.group(2)}{intel.group(3)}".lower()
+    amd = _CPU_AMD_RE.search(title)
+    if amd:
+        number = amd.group(1) or amd.group(3)
+        suffix = amd.group(2) or amd.group(4) or ""
+        return f"ryzen-{number}{suffix}".lower()
     return None
+
+
+# Categories where naming a console names the PLATFORM the item runs on, not
+# the item. 547 Video Games listings keyed as `switch`, which made every Switch
+# game share one identity: a $7 budget title comped against $60 first-party
+# ones and surfaced at an 82% discount. That is exactly what model_key's exact
+# match was tightened to prevent on 2026-08-01, arriving from the other side.
+_PLATFORM_ONLY_CATEGORIES = ("video games", "game cases", "memory cards", "accessor")
+
+
+def _console_key(title: str, category: str | None = None) -> str | None:
+    lowered = (category or "").lower()
+    if any(token in lowered for token in _PLATFORM_ONLY_CATEGORIES):
+        return None
+    match = _CONSOLE_MODEL_RE.search(title)
+    if not match:
+        return None
+    if match.group(1):
+        return "switch-2"
+    qualified = match.group(2) or match.group(3)
+    if qualified:
+        return f"switch-{qualified.lower()}"
+    if match.group(4):
+        return "switch"
+    playstation = match.group(5) or match.group(6)
+    if playstation:
+        return f"ps{playstation}"
+    if match.group(7):
+        return f"xbox-series-{match.group(7).lower()}"
+    if match.group(8):
+        return "xbox-one"
+    return None  # pragma: no cover - every branch above is covered
+
+
+def _phone_key(title: str) -> str | None:
+    match = _PHONE_MODEL_RE.search(title)
+    if not match:
+        return None
+    if match.group(1):
+        return f"iphone-{match.group(1)}e"
+    if match.group(3):
+        parts = ["iphone", match.group(3)]
+        if match.group(4):
+            parts.append(_normalize_key_part(match.group(4)))
+        return "-".join(parts)
+    if match.group(5):
+        return f"iphone-{_normalize_key_part(match.group(5))}"
+    if match.group(6):
+        parts = ["galaxy", match.group(6).lower() + match.group(7)]
+        if match.group(8):
+            parts.append(_normalize_key_part(match.group(8)))
+        return "-".join(parts)
+    if match.group(9):
+        parts = ["pixel", match.group(9)]
+        if match.group(10):
+            parts.append(_normalize_key_part(match.group(10)))
+        return "-".join(parts)
+    return None  # pragma: no cover - every branch above is covered
+
+
+def _model_key(title: str, category: str | None = None) -> str | None:
+    """A normalized product identifier, where the model is the spec.
+
+    The single most selective filter in the pipeline: ml/similar.py matches it
+    EXACTLY, so a candidate with no key is excluded rather than kept, unlike
+    every other spec field. That is why coverage matters so much here, and why
+    this was the highest-leverage gap in the project.
+
+    Until 2026-08-10 this recognised graphics-card chipsets and nothing else,
+    so `deal_candidates` (which needs a model_key or an epid shared with a sold
+    listing) could only ever consider 44.8% of active listings. Everything else
+    was ingested, hashed, embedded, extracted, and never valued. Measured
+    per category, keyed listings out of comparable ones:
+
+        graphics cards   3,306 / 3,470     already worked
+        processors           2 / 1,335     CPU pattern existed, was never called
+        consoles             2 / 2,416     no pattern at all
+        phones               0 / 5,146     no pattern at all
+
+    Each family below halves the price spread of its category, measured with
+    p90/p10 rather than max/min (ADR 0019 explains why the old metric lied):
+
+        processors   4.06x category-wide -> 1.81x within key, 89.0% keyed
+        consoles     4.00x               -> 1.88x            99.0% keyed
+        phones       3.08x               -> 1.58x            99.3% keyed
+
+    **Order is deliberate, and GPU comes first for machines, not by accident.**
+    A gaming PC names both a graphics card and a processor, and the card is
+    the dominant price driver: keying PC Desktops by GPU takes their spread
+    from 5.08x to 2.0x, and laptops from 3.86x to 1.71x. Keying the same
+    listings by CPU instead would group a $900 machine with a $3,000 one.
+
+    **Not gated on category, deliberately.** A key fires on any title that
+    names a product it recognises, including a server that names its Ryzen and
+    a PC that names its RTX. That is correct because ml/similar.py filters
+    candidates on `category` with a hard `==` first, so a keyed server can only
+    ever meet another server, where "same CPU" is exactly the comparison
+    wanted. Measured leakage outside the obvious category is 4.27% for CPUs
+    and 2.82% for consoles, and essentially all of it is machines naming their
+    own components. Phones leak at 0.07%.
+
+    Still returns None for most of the corpus (memory, storage, motherboards),
+    which remains the honest answer: those are priced by capacity and
+    generation, which have their own fields.
+    """
+    if (key := _gpu_key(title)):
+        return key
+    if (key := _cpu_key(title)):
+        return key
+    # The only family that needs the category: see _PLATFORM_ONLY_CATEGORIES.
+    if (key := _console_key(title, category)):
+        return key
+    return _phone_key(title)
 
 
 @dataclass
@@ -777,14 +1193,19 @@ def _completeness(title: str) -> tuple[str | None, dict]:
 
 
 def extract_variant(
-    title: str, aspects: dict | None = None, category: str | None = None
+    title: str,
+    aspects: dict | None = None,
+    category: str | None = None,
+    condition: str | None = None,
 ) -> Variant:
-    """Classify a listing from its title.
+    """Classify a listing from its title, and from what eBay already states.
 
     aspects is consulted as a fallback for capacity, which eBay carries on 99%
     of phones and 0.3% of graphics cards. category disambiguates "no GPU",
     which means an empty box on a graphics-card listing and a working machine
-    on a workstation."""
+    on a workstation. condition is eBay's own dropdown value, and it settles
+    "for parts or not working" outright on 485 listings whose titles never said
+    so."""
     title = title or ""
     signals: dict = {}
 
@@ -801,10 +1222,42 @@ def extract_variant(
     completeness, completeness_signals = _completeness(title)
     signals.update(completeness_signals)
 
+    # eBay's structured condition first: it is stated rather than inferred, so
+    # it beats every regex below on the listings that carry it.
+    defect_from_condition = bool(condition and _CONDITION_DEFECT_RE.search(condition))
+    if defect_from_condition:
+        signals["defect_from_condition"] = condition
+
     defect = _DEFECT_RE.search(title)
     if defect is None and _is_component_category(category):
         # See _MISSING_SUFFIX_RE: only a component can be missing its core.
         defect = _MISSING_SUFFIX_RE.search(title)
+    if (
+        defect is None
+        and _is_component_category(category)
+        and not _WHOLE_MACHINE_RE.search(title)
+    ):
+        # The same component/machine split, in the third word order sellers
+        # use. `_DEFECT_RE` reads "MISSING CORE", `_MISSING_SUFFIX_RE` reads
+        # "GPU AND MEMORY MISSING", and neither reads "NO RAM/GPU", which put
+        # a $59 stripped RTX 4090 at the top of the deal feed against a
+        # $2,699.99 estimate.
+        #
+        # `_MISSING_COMPONENT_RE` already matches all three phrasings; what it
+        # lacks on its own is the discriminator, because for a *machine* it
+        # means a working reduced configuration and flagging that wrongly hit
+        # real $1,800-$4,900 listings. So it becomes a defect only when eBay
+        # files the listing as a component AND the title names no whole
+        # machine. That second clause is load-bearing rather than belt-and-
+        # braces: the corpus contains an $800 "gaming computer desktop ...
+        # rtx 3060 ... no ram" that a seller filed under a component category,
+        # and it is the one false positive in the six listings this matches.
+        defect = _MISSING_COMPONENT_RE.search(title)
+    if defect is None and not _CRACK_DENIED_RE.search(title):
+        # Only once the denial is ruled out: "no cracks" contains "cracks".
+        defect = _CRACK_RE.search(title)
+    if defect is None:
+        defect = _DOA_RE.search(title)
     if defect:
         signals["defect_match"] = defect.group(0).strip()
 
@@ -827,7 +1280,7 @@ def extract_variant(
     if variant_match:
         signals["multi_variant_match"] = variant_match
 
-    capacity = _capacity_gb(title)
+    capacity = _capacity_gb(title, category)
     if capacity is None:
         # eBay's structured aspects carry capacity reliably for consumer goods
         # and almost never for components (99% on phones, 0.3% on graphics
@@ -835,7 +1288,7 @@ def extract_variant(
         for key in ("Storage Capacity", "Capacity", "RAM Size", "Total Capacity"):
             raw = (aspects or {}).get(key)
             if raw:
-                capacity = _capacity_gb(str(raw))
+                capacity = _capacity_gb(str(raw), category)
                 if capacity is not None:
                     signals["capacity_from_aspects"] = key
                     break
@@ -848,7 +1301,7 @@ def extract_variant(
     # stick and a 2x16GB kit are not quite the same thing at the same total).
     # Whether that difference is worth a comp filter needs measuring on the
     # corpus first; until then this makes the population visible.
-    kits = _kit_capacities(title)
+    kits = _kit_capacities(title, category)
     if kits:
         modules, total = max(kits, key=lambda kit: kit[1])
         signals["kit_modules"] = modules
@@ -862,14 +1315,14 @@ def extract_variant(
     if form_factor:
         signals["form_factor"] = form_factor
 
-    model_key = _model_key(title)
+    model_key = _model_key(title, category)
     if model_key:
         signals["model_key"] = model_key
 
     return Variant(
         lot_size=lot_size,
         completeness=completeness,
-        has_defect=bool(defect),
+        has_defect=bool(defect) or defect_from_condition,
         is_accessory=accessory,
         price_is_from=price_is_from,
         capacity_gb=capacity,

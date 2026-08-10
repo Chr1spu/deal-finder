@@ -21,7 +21,7 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 from sqlalchemy import Engine
@@ -84,7 +84,7 @@ def _write_embeddings(
         embedded = 0
         try:
             with Session(db_engine) as session:
-                now = datetime.now(timezone.utc)
+                now = datetime.now(UTC)
                 for listing_id, vector in updates:
                     listing = session.get(Listing, listing_id)
                     if listing is None:
@@ -186,9 +186,9 @@ def embed_pending(
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    started = datetime.now(timezone.utc)
+    started = datetime.now(UTC)
     outcome = embed_pending()
-    elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+    elapsed = (datetime.now(UTC) - started).total_seconds()
     print(
         f"Attempted {outcome.attempted} listings in {elapsed:.0f}s: "
         f"{outcome.embedded} embedded, {outcome.failed} had no usable image"

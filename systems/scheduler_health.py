@@ -23,7 +23,7 @@ Run: `python -m systems.scheduler_health`
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from systems.queue import get_redis
 from systems.scheduler import HEARTBEAT_KEY
@@ -34,7 +34,7 @@ def read_heartbeat() -> dict | None:
     raw = get_redis().get(HEARTBEAT_KEY)
     # redis-py's stubs allow an awaitable here for the async client; this is the
     # sync one, so narrow rather than cast and stay honest about the shape.
-    if not isinstance(raw, (str, bytes, bytearray)):
+    if not isinstance(raw, str | bytes | bytearray):
         return None
     try:
         return json.loads(raw)
@@ -52,23 +52,23 @@ def describe() -> str:
             "    python -u -m systems.scheduler"
         )
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     beat_at = datetime.fromisoformat(state["at"])
     age = (now - beat_at).total_seconds()
     errors = state.get("consecutive_errors", 0)
 
-    lines = ["SCHEDULER UP: heartbeat %.0fs old" % age]
+    lines = [f"SCHEDULER UP: heartbeat {age:.0f}s old"]
     if errors:
         # Isolated failures keep the loop alive, which is the point, but a
         # rising count means every enqueue is failing and nothing is running.
-        lines.append("  WARNING: %d consecutive enqueue failures" % errors)
+        lines.append(f"  WARNING: {errors} consecutive enqueue failures")
 
     for name, iso in sorted((state.get("last_run") or {}).items()):
         if iso is None:
-            lines.append("  %-20s never run this session" % name)
+            lines.append(f"  {name:<20} never run this session")
             continue
         ago = (now - datetime.fromisoformat(iso)).total_seconds()
-        lines.append("  %-20s last enqueued %.0f min ago" % (name, ago / 60))
+        lines.append(f"  {name:<20} last enqueued {ago / 60:.0f} min ago")
     return "\n".join(lines)
 
 

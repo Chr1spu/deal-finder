@@ -5,6 +5,8 @@ which was survivable at a few hundred listings and stopped being so at ten
 thousand plus a 512-float vector each. These tests pin the shape of the fix.
 """
 
+from datetime import UTC
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session, select
@@ -134,7 +136,7 @@ def test_filters_by_source_and_status(client, test_engine):
 
 
 def test_price_history_is_oldest_first(client, test_engine):
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from api.models import PriceObservation
 
@@ -149,7 +151,7 @@ def test_price_history_is_oldest_first(client, test_engine):
                     listing_id=listing.id,
                     price=price,
                     shipping_cost=10.0,
-                    observed_at=datetime(2026, 8, day, tzinfo=timezone.utc),
+                    observed_at=datetime(2026, 8, day, tzinfo=UTC),
                 )
             )
         session.commit()
@@ -164,7 +166,7 @@ def test_price_history_is_oldest_first(client, test_engine):
 def test_unknown_shipping_leaves_total_cost_null_rather_than_equal_to_price(client, test_engine):
     """Charting unknown shipping as zero would draw a delivered-cost line that
     never existed, and it biases in the dangerous direction."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from api.models import PriceObservation
 
@@ -178,7 +180,7 @@ def test_unknown_shipping_leaves_total_cost_null_rather_than_equal_to_price(clie
                 listing_id=listing.id,
                 price=50.0,
                 shipping_cost=None,
-                observed_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+                observed_at=datetime(2026, 8, 1, tzinfo=UTC),
             )
         )
         session.commit()

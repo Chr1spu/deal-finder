@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from api.settings import settings
 from systems.queue import (
@@ -104,7 +104,7 @@ def run_forever() -> None:
     )
 
     while True:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         for name, interval_seconds, enqueue in tasks:
             if not due(last_run[name], interval_seconds, now):

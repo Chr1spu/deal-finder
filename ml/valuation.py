@@ -308,6 +308,23 @@ def deal_candidates(db_engine: Engine | None = None, scan_limit: int | None = No
             col(Listing.has_defect).is_(False),
             col(Listing.is_accessory).is_(False),
             col(Listing.price_is_from).is_(False),
+            # An auction's `price` is the current bid, not an asking price, and
+            # with no bids it is an opening bid the seller set deliberately low
+            # to attract them. Scoring that as a discount measures the seller's
+            # marketing, not the market: a "PNY RTX 4090 Verto 24gb" opened at
+            # $107.87 and read as a 95% discount against a $2,699.99 estimate.
+            #
+            # ADR 0004 captured `is_auction` precisely because unflagged
+            # auctions "would have quietly poisoned stage 4's comps", then left
+            # the question of what to do with them for real data. This is the
+            # answer for the query side: 451 active auctions, 279 of them with
+            # zero bids, none of which has an asking price to discount.
+            #
+            # Deliberately NOT excluded from the comp side in ml/similar.py. A
+            # *sold* auction's final price is a real transaction, which is
+            # better evidence than an unsold listing's asking price, and
+            # throwing it away would discard the best comps this system has.
+            col(Listing.is_auction).is_(False),
         )
         if sold_models or sold_epids:
             statement = statement.where(

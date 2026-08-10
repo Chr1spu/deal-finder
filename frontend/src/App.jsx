@@ -2,8 +2,9 @@ import { useEffect, useState } from "react";
 import { api, getApiKey, setApiKey } from "./api";
 import DealCard from "./DealCard";
 import SavedSearches from "./SavedSearches";
+import Watchlist from "./Watchlist";
 
-const TABS = ["Deals", "Searches"];
+const TABS = ["Deals", "Watchlist", "Searches"];
 
 export default function App() {
   const [tab, setTab] = useState("Deals");
@@ -30,7 +31,11 @@ export default function App() {
           onChange={(e) => { setKey(e.target.value); setApiKey(e.target.value); }}
         />
       </header>
-      <main>{tab === "Deals" ? <Deals /> : <SavedSearches />}</main>
+      <main>
+        {tab === "Deals" && <Deals />}
+        {tab === "Watchlist" && <Watchlist />}
+        {tab === "Searches" && <SavedSearches />}
+      </main>
     </div>
   );
 }

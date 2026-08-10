@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 
 from pgvector.sqlalchemy import Vector
@@ -48,6 +48,27 @@ class Listing(SQLModel, table=True):
     location: str | None = None
     condition: str | None = None
     category: str | None = None
+
+    # eBay's numeric category id, which is what `category` above should have
+    # been all along.
+    #
+    # ml/similar.py filters comps on `category` with a hard `==`, and the name
+    # is locale-dependent while the id is not. The corpus already contains
+    # `Grafik-/Videokarten` beside `Graphics/Video Cards`, `CPUs/Prozessoren`
+    # beside `CPUs/Processors`, and `PC Desktops & All-in-Ones` beside
+    # `All-In-Ones`: the same eBay category under several names, which the
+    # `==` filter treats as different pools. Roughly 90 listings sit in
+    # locale-duplicate pools too small to reach the three-comp minimum, so
+    # they can never be valued. See ADR 0021.
+    #
+    # Captured but NOT yet filtered on, deliberately. Every existing row has
+    # NULL here, so switching the filter today would be strictly worse than
+    # the name: it would split the corpus into "has an id" and "does not"
+    # rather than merging the locales. Move ml/similar.py onto this once
+    # coverage is high (`select count(category_id)::float/count(*) from
+    # listing`); ingestion fills it for new rows and the disappearance check
+    # backfills active ones as it enriches them.
+    category_id: str | None = Field(default=None, index=True)
 
     # Shipping is part of what a buyer actually pays, so comparing deals on
     # item price alone is a correctness bug once stage 4 is scoring them.
@@ -176,13 +197,13 @@ class Listing(SQLModel, table=True):
 
     status: ListingStatus = Field(default=ListingStatus.active, sa_column=Column(String, index=True))
 
-    first_seen_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    first_seen_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     # last_seen_at is refreshed by ingestion whenever the listing turns up in
     # a saved search, which (since eBay only returns active listings) is free
     # proof it's still alive. last_checked_at is only set by the disappearance
     # check, which costs an API call. The gap between them is what the check
     # prioritizes on. See docs/decisions/0003-ebay-call-budget.md.
-    last_seen_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+    last_seen_at: datetime = Field(default_factory=lambda: datetime.now(UTC), index=True)
     last_checked_at: datetime | None = Field(default=None, index=True)
 
     # Set by the first failed lookup, cleared if the listing turns up again.
@@ -298,6 +319,7 @@ class ListingRead(SQLModel):
     location: str | None = None
     condition: str | None = None
     category: str | None = None
+    category_id: str | None = None
 
     shipping_cost: float | None = None
     shipping_estimated: bool = False
@@ -352,7 +374,7 @@ class SavedSearch(SQLModel, table=True):
     # See docs/decisions/0016-saved-search-crud.md.
     enabled: bool = Field(default=True, index=True)
 
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     # Observability, not config. eBay reports how many results a query really
     # has; ingestion only ever sees the first 200. Recording the total turns
@@ -382,4 +404,49 @@ class PriceObservation(SQLModel, table=True):
     price: float
     shipping_cost: float | None = None
 
-    observed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+    observed_at: datetime = Field(default_factory=lambda: datetime.now(UTC), index=True)
+
+
+class WatchlistItem(SQLModel, table=True):
+    """A listing the user is deliberately tracking.
+
+    The last view from the original stage 6 plan, and the only one that is
+    about a *single* listing over time rather than the corpus at a moment. The
+    deal feed answers "what is underpriced right now" and is rebuilt from
+    scratch by every scan; a watchlist answers "what happened to that one",
+    which needs a row that survives the listing leaving the feed.
+
+    Everything it displays already exists. `PriceObservation` records each
+    price change, so the chart is a query rather than new collection. The
+    disappearance check writes `status`, `missing_since` and `sale_confidence`,
+    so "did it sell, and for roughly what" is answered by rows already being
+    written every two hours for every active listing.
+
+    Watching is deliberately free: it enrols the listing in nothing. That is
+    worth stating because a watchlist is the obvious place to put "check this
+    one more often", and doing that would spend eBay calls per watched item
+    out of the same 5,000/day budget that ADR 0003 exists to protect. The
+    disappearance check already visits every active listing on a schedule
+    derived from that budget, and a watchlist that quietly reprioritised it
+    would be a coverage decision disguised as a UI feature.
+    """
+
+    id: int | None = Field(default=None, primary_key=True)
+
+    # Unique rather than a plain FK: watching something twice is the same as
+    # watching it once, and letting duplicates in makes every read distinct().
+    listing_id: int = Field(foreign_key="listing.id", index=True, unique=True)
+
+    added_at: datetime = Field(default_factory=lambda: datetime.now(UTC), index=True)
+
+    # Why this one was worth watching, in the user's words. The system has
+    # opinions (deal_score, confidence) and they are recomputed constantly;
+    # this is the one field here that a scan cannot overwrite.
+    note: str | None = None
+
+    # The price when it was added, frozen. Listing.price moves under the row,
+    # so without this "has it dropped since I started watching?" is not
+    # answerable from the watchlist alone. PriceObservation could reconstruct
+    # it by timestamp, but only for listings whose price has changed since,
+    # and the answer would silently depend on that.
+    price_when_added: float

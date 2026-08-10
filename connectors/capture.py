@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import Engine
@@ -125,7 +125,7 @@ def to_listing(captured: CapturedListing, now: datetime | None = None) -> Listin
     the same target shape: one table, one set of downstream consumers. A
     captured listing differs only in which columns are null.
     """
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     # Extract here rather than leaving it to the batch job: a capture is
     # matched immediately, and its own completeness is what decides whether
     # the comp set gets filtered. A Depop "console only" matched against
@@ -198,7 +198,7 @@ def save_capture(
     reused photos are far more common off eBay than on it.
     """
     db_engine = db_engine or default_engine
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     fresh = to_listing(captured, now=now)
     if fresh.images:
         fresh.image_hash = image_hasher(fresh.images[0])
@@ -240,14 +240,13 @@ def save_capture(
             existing.shipping_cost = fresh.shipping_cost
         if fresh.aspects:
             existing.aspects = fresh.aspects
-        if fresh.images:
-            # A re-capture may see better photos, and unlike eBay ingest there
-            # is no image_hash relist detection on these rows to desync.
-            if existing.images != fresh.images:
-                existing.images = fresh.images
-                existing.image_hash = fresh.image_hash
-                existing.embedded_at = None  # re-embed against the new photo
-                existing.embedding = None
+        # A re-capture may see better photos, and unlike eBay ingest there is
+        # no image_hash relist detection on these rows to desync.
+        if fresh.images and existing.images != fresh.images:
+            existing.images = fresh.images
+            existing.image_hash = fresh.image_hash
+            existing.embedded_at = None  # re-embed against the new photo
+            existing.embedding = None
         if existing.image_hash is None and fresh.image_hash is not None:
             existing.image_hash = fresh.image_hash
 

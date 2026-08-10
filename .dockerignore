@@ -1,0 +1,23 @@
+# Build context is the repo root (see infra/docker-compose.yml), so everything
+# large and machine-specific has to be excluded explicitly or every build ships
+# a 4.6 GB venv and node_modules to the daemon.
+.git
+.venv
+venv
+node_modules
+frontend/node_modules
+frontend/dist
+frontend/.vite
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.env
+*.log
+
+# Working docs. Not secret, just not part of an image.
+DEVLOG.md
+LEARNING_LOG.md
+CLAUDE.md
+PROJECT_PLAN.md

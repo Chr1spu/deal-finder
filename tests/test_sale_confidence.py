@@ -5,7 +5,7 @@ engine's entire output is a function of how good the comp set is, and this
 module is what decides which comps are trustworthy.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlmodel import Session
@@ -17,7 +17,7 @@ from connectors.sale_confidence import (
     score_sale,
 )
 
-NOW = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 27, 12, 0, tzinfo=UTC)
 
 
 def make_listing(

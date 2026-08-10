@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import pytest
 import respx
 from httpx import Response
 
@@ -76,7 +77,7 @@ def test_get_item_returns_none_when_listing_is_gone():
     respx.post(AUTH_URL).mock(
         return_value=Response(200, json={"access_token": "fake-token", "expires_in": 7200})
     )
-    respx.get(f"https://api.sandbox.ebay.com/buy/browse/v1/item/v1|123|0").mock(
+    respx.get("https://api.sandbox.ebay.com/buy/browse/v1/item/v1|123|0").mock(
         return_value=Response(404)
     )
 
@@ -96,8 +97,6 @@ def test_search_items_without_credentials_raises_clear_error(monkeypatch):
     monkeypatch.setattr("connectors.ebay.settings.ebay_client_secret", "")
     client = EbayClient(client_id="", client_secret="", env="sandbox")
 
-    try:
+    with pytest.raises(EbayAuthError) as excinfo:
         client.search_items("nintendo switch")
-        assert False, "expected EbayAuthError"
-    except EbayAuthError as e:
-        assert "EBAY_CLIENT_ID" in str(e)
+    assert "EBAY_CLIENT_ID" in str(excinfo.value)

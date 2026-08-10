@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+from api.models import Listing
 from connectors.normalizer import (
     enrich_from_item_body,
     listing_has_ended,
@@ -434,3 +435,66 @@ def test_unknown_shapes_do_not_invent_a_sale():
     ):
         body.pop("itemEndDate", None) if body.get("itemEndDate") is None else None
         assert listing_has_ended(body) is False
+
+
+def test_category_id_is_captured_alongside_the_name():
+    """The name is locale-dependent and the id is not. ml/similar.py filters
+    on the name with a hard `==`, which already splits `Grafik-/Videokarten`
+    from `Graphics/Video Cards` into pools too small to reach three comps."""
+    raw = {
+        "itemId": "v1|123|0",
+        "title": "Nintendo Switch OLED",
+        "price": {"value": "199.99", "currency": "USD"},
+        "itemWebUrl": "https://www.ebay.com/itm/123",
+        "categories": [{"categoryId": "139971", "categoryName": "Video Game Consoles"}],
+    }
+    listing = normalize_ebay_item(raw)
+    assert listing.category == "Video Game Consoles"
+    assert listing.category_id == "139971"
+
+
+def test_a_listing_with_no_categories_gets_neither():
+    raw = {
+        "itemId": "v1|124|0",
+        "title": "Something",
+        "price": {"value": "10.00", "currency": "USD"},
+        "itemWebUrl": "https://www.ebay.com/itm/124",
+    }
+    listing = normalize_ebay_item(raw)
+    assert listing.category is None
+    assert listing.category_id is None
+
+
+def test_enrichment_backfills_a_missing_category_id():
+    """The only route by which the existing corpus acquires one: nothing else
+    revisits an old row."""
+    listing = Listing(
+        source="ebay",
+        source_id="v1|125|0",
+        title="Nintendo Switch OLED",
+        price=199.99,
+        url="https://www.ebay.com/itm/125",
+        category="Video Game Consoles",
+    )
+    assert listing.category_id is None
+
+    enrich_from_item_body(
+        listing,
+        {"categories": [{"categoryId": "139971", "categoryName": "Video Game Consoles"}]},
+    )
+    assert listing.category_id == "139971"
+
+
+def test_enrichment_never_blanks_a_category_id_it_already_has():
+    """Additive, like everything in enrich_from_item_body: a response missing
+    a field must not erase what ingestion learned."""
+    listing = Listing(
+        source="ebay",
+        source_id="v1|126|0",
+        title="Nintendo Switch OLED",
+        price=199.99,
+        url="https://www.ebay.com/itm/126",
+        category_id="139971",
+    )
+    enrich_from_item_body(listing, {"title": "no categories here"})
+    assert listing.category_id == "139971"

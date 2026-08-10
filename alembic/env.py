@@ -1,13 +1,19 @@
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy import engine_from_config, pool
 from sqlmodel import SQLModel
 
+from alembic import context
+
+# Every table model has to be imported here or it is absent from
+# SQLModel.metadata, and `alembic revision --autogenerate` would then emit a
+# DROP for it. WatchlistItem was missing until 2026-08-10, which the next
+# autogenerate would have turned into a destructive diff.
 from api.models import (  # noqa: F401 (registers metadata)
     Listing,
     PriceObservation,
     SavedSearch,
+    WatchlistItem,
 )
 from api.settings import settings
 

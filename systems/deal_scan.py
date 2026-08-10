@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import cast
 
 import httpx
@@ -137,7 +137,7 @@ def run_deal_scan(scan_limit: int | None = None, alert: bool = True) -> int:
     redis = _redis()
     payload = json.dumps([d.model_dump(mode="json") for d in deals])
     redis.set(DEALS_KEY, payload, ex=CACHE_TTL_SECONDS)
-    redis.set(SCAN_AT_KEY, datetime.now(timezone.utc).isoformat(), ex=CACHE_TTL_SECONDS)
+    redis.set(SCAN_AT_KEY, datetime.now(UTC).isoformat(), ex=CACHE_TTL_SECONDS)
 
     if alert:
         notify_discord(deals)

@@ -2,11 +2,8 @@ from sqlmodel import Session
 
 from api.models import EMBEDDING_DIM, Listing
 from ml.match import (
-    COMPS_FROM_CANDIDATES,
-    COMPS_FROM_EPID,
-    comps_for_epid,
-    MATCH_BY_EMBEDDING,
     MATCH_BY_IMAGE_HASH,
+    comps_for_epid,
     find_by_image_hash,
     match_listing,
     summarize_prices,

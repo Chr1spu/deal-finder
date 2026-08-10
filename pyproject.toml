@@ -63,9 +63,21 @@ torchvision = [{ index = "pytorch-cu128" }]
 [tool.ruff]
 target-version = "py312"
 line-length = 110
+# Alembic migrations are generated from a template and are immutable history:
+# rewriting a migration that has already run against the production database
+# gains nothing and risks a great deal. They account for the large majority of
+# lint findings here, and none of it is code anyone reads or edits.
+extend-exclude = ["alembic/versions"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# B008 forbids function calls in argument defaults. That is exactly how
+# FastAPI declares dependencies and query parameters (`Depends(get_session)`,
+# `Query(default=...)`), so the rule is a false positive on every route in
+# this package and "fixing" it would break the app rather than improve it.
+"api/**" = ["B008"]
 
 [tool.mypy]
 python_version = "3.12"

@@ -5,6 +5,7 @@ from api.routes.capture import router as capture_router
 from api.routes.deals import router as deals_router
 from api.routes.listings import router as listings_router
 from api.routes.saved_searches import router as saved_searches_router
+from api.routes.watchlist import router as watchlist_router
 
 app = FastAPI(title="Undercut API")
 
@@ -29,6 +30,7 @@ app.include_router(listings_router)
 app.include_router(capture_router)
 app.include_router(deals_router)
 app.include_router(saved_searches_router)
+app.include_router(watchlist_router)
 
 
 @app.get("/health")

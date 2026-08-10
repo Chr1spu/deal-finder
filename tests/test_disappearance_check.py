@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlmodel import Session, select
 
@@ -55,7 +55,7 @@ def seed_listing(
     last_seen_days_ago: float = 1.0,
     first_seen_days_ago: float = 1.0,
 ) -> None:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     session.add(
         Listing(
             source=source,
@@ -236,8 +236,8 @@ def test_pending_confirmations_are_checked_before_anything_else(test_engine):
         listing = session.exec(
             select(Listing).where(Listing.source_id == "awaiting-strike-two")
         ).one()
-        listing.missing_since = datetime.now(timezone.utc) - timedelta(hours=6)
-        listing.last_checked_at = datetime.now(timezone.utc) - timedelta(hours=6)
+        listing.missing_since = datetime.now(UTC) - timedelta(hours=6)
+        listing.last_checked_at = datetime.now(UTC) - timedelta(hours=6)
         session.add(listing)
         session.commit()
 
@@ -296,7 +296,7 @@ def test_budget_is_spread_across_candidates_by_least_recently_checked(test_engin
     """Every candidate is out of search coverage, so last_seen_at barely
     varies between them. Ordering on last_checked_at is what stops a small
     budget re-checking the same few listings while others never come round."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     with Session(test_engine) as session:
         seed_listing(session, "checked-recently", last_seen_days_ago=5)
         seed_listing(session, "checked-long-ago", last_seen_days_ago=5)
@@ -649,3 +649,51 @@ def test_the_checker_still_has_budget_at_the_reserve_boundary():
 
     assert resolve_budget(AtBoundary(), settings.disappearance_check_budget,
                           settings.quota_reserve) > 0
+
+
+def test_enrichment_re_extracts_because_it_can_supply_the_missing_input(test_engine):
+    """`aspects` is getItem-only, so a listing is extracted without it and
+    learns it here, days later. Nothing re-extracted the row, so it stayed
+    permanently one enrichment behind: 74 listings (0.28%) were sitting with a
+    NULL capacity that was derivable from aspects already stored."""
+    from ml.extract import extract_variant
+
+    now = datetime.now(UTC)
+    with Session(test_engine) as session:
+        listing = Listing(
+            source="ebay",
+            source_id="v1|enrich|0",
+            title="Nintendo Switch",
+            price=200.0,
+            url="https://www.ebay.com/itm/1",
+            category="Video Game Consoles",
+            status=ListingStatus.active,
+            # Old enough not to be skipped as proven alive by ingestion.
+            first_seen_at=now - timedelta(days=2),
+            last_seen_at=now - timedelta(days=2),
+        )
+        # Extracted before aspects existed, which is the real sequence.
+        variant = extract_variant(listing.title, None, listing.category)
+        listing.capacity_gb = variant.capacity_gb
+        listing.variant_signals = variant.signals
+        session.add(listing)
+        session.commit()
+        session.refresh(listing)
+        listing_id = listing.id
+        assert listing.capacity_gb is None
+
+    client = FakeEbayClient(
+        gone=set(),
+        body={
+            "estimatedAvailabilityStatus": "IN_STOCK",
+            "localizedAspects": [{"name": "Storage Capacity", "value": "32 GB"}],
+        },
+    )
+    check_listings_for_source("ebay", client=client, db_engine=test_engine)
+
+    with Session(test_engine) as session:
+        refreshed = session.get(Listing, listing_id)
+        assert refreshed.aspects == {"Storage Capacity": "32 GB"}
+        # The point of the test: the capacity is now derived, not merely
+        # derivable.
+        assert refreshed.capacity_gb == 32

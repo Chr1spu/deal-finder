@@ -105,12 +105,31 @@ Three measurements from stage 3a that 3b and 4 should be designed against, all r
 **6. Frontend**
 
 - [x] React dashboard: deal feed, comp explanation view, price chart, saved-search management (`frontend/`)
-- [ ] Watchlist (the one view from the original plan not yet built)
+- [x] Watchlist (`api/routes/watchlist.py`, `frontend/src/Watchlist.jsx`, migration `0016`)
+
+Stage 6 done 2026-08-10. The watchlist was built last because it needed the
+price-history table (`PriceObservation`, added in `0004`) and the sale
+confidence the disappearance check writes; both existed, so it collects
+nothing new and joins things already being recorded. Its one column that does
+not depend on the estimate being right is the change since a listing was
+watched, which compares a listing against its own earlier price rather than
+against comps.
 
 **7. Deploy + polish**
 
-- [ ] Docker Compose full stack, deploy api/worker + frontend
-- [ ] Write up README, polish devlog
+- [x] Docker Compose full stack (`infra/Dockerfile`, `infra/Dockerfile.frontend`, `infra/nginx.conf`, `infra/docker-compose.yml`, ADR `0020`)
+- [ ] Deploy it to an actual host
+- [x] Write up README, polish devlog
+
+Run end to end on 2026-08-10 via `infra/docker-compose.isolated.yml`, which
+moves every port, namespaces the volumes under its own project name and scales
+the scheduler to zero, so it cannot share a Redis with the host pipeline.
+Verified: migrations 0001 to 0017 under the one-shot `migrate` gate, the API
+serving, nginx proxying `/api`, both workers deriving queue names from code,
+and a real job round-tripping through a worker. Torn down with `-v`; the live
+corpus was checked untouched afterwards.
+
+What remains is a host to deploy it to.
 
 ### Post-completion backlog: perfecting the Deal Scanner
 
@@ -120,7 +139,7 @@ Things worth revisiting once stages 1-7 above are actually done, not blockers to
 - **Paginate past the 200-result cap.** Each saved search only ever sees eBay's first 200 results per run (its per-call max); a keyword with more active listings than that never has its later results seen at all. Needs looping with eBay's `offset` parameter until a keyword's results are exhausted, with a sane upper bound. As of 2026-07-12 this is at least *measurable*: `SavedSearch.last_result_total` records how many results eBay says exist, so `WHERE last_result_total > 200` names exactly which searches are being truncated. Note the tension with the call budget, though: pagination multiplies ingest cost per search, and ingest calls come out of the same 5,000/day as disappearance checking.
 - ~~**Capture shipping cost.**~~ Done 2026-07-12. It turned out to cost nothing: eBay returns `shippingOptions[].shippingCost` in the same payload ingestion already fetches, so this was a normalizer change, not a new API call. Captured alongside `buyingOptions`, which was being dropped the same way and matters more (for an auction, `price` is the current bid, not an asking price, so unflagged auctions would have quietly poisoned stage 4's comps). See `docs/decisions/0004-trustworthy-comp-data.md`.
 - **Decide what stage 4 does with auction comps.** Now that `is_auction` exists, the first question to ask of real data is what fraction of the corpus it covers. If it's large, comps need a weighting or exclusion rule; ADR 0004 deliberately doesn't decide this without data.
-- **`buy.item.bulk`, if it is obtainable at all.** Both it and Marketplace Insights are Limited Release scopes that this application gets `403` on today, and eBay refuses to mint tokens for either. Marketplace Insights (real sold prices, which is exactly what disappearance tracking infers the hard way) appears to be granted only to established partners and is probably not realistic for a personal project, so **plan as though it is not coming**. `buy.item.bulk` is the more interesting of the two anyway, because it targets the constraint actually being hit: it gates Browse's `getItems`, which takes 20 item ids per call, and per `getRateLimits` it runs on a *separate* 5,000/day meter from search. That would move disappearance checking off the shared budget entirely (~100,000 listing-checks/day) and free the whole Browse allowance for ingest, supporting roughly 400 saved searches instead of 91. Per eBay's Buy API requirements docs, the route is the **eBay Partner Network**, not the developer portal: create an EPN account, submit the Buy API Application, reply to the confirmation email with **mocks and data flows of your user experience**, wait ~10 business days for an approve/decline, then open a Developer Support ticket titled "Buy API Production Access (eBay user ID)". Approval is explicitly not guaranteed, and the Buy APIs are stated to be "intended for eBay partners only".
+- **`buy.item.bulk`, if it is obtainable at all.** The application is now drafted at `docs/ebay-partner-network-application.md`; submitting needs an EPN account in a real name. Both it and Marketplace Insights are Limited Release scopes that this application gets `403` on today, and eBay refuses to mint tokens for either. Marketplace Insights (real sold prices, which is exactly what disappearance tracking infers the hard way) appears to be granted only to established partners and is probably not realistic for a personal project, so **plan as though it is not coming**. `buy.item.bulk` is the more interesting of the two anyway, because it targets the constraint actually being hit: it gates Browse's `getItems`, which takes 20 item ids per call, and per `getRateLimits` it runs on a *separate* 5,000/day meter from search. That would move disappearance checking off the shared budget entirely (~100,000 listing-checks/day) and free the whole Browse allowance for ingest, supporting roughly 400 saved searches instead of 91. Per eBay's Buy API requirements docs, the route is the **eBay Partner Network**, not the developer portal: create an EPN account, submit the Buy API Application, reply to the confirmation email with **mocks and data flows of your user experience**, wait ~10 business days for an approve/decline, then open a Developer Support ticket titled "Buy API Production Access (eBay user ID)". Approval is explicitly not guaranteed, and the Buy APIs are stated to be "intended for eBay partners only".
 
 Two things follow. First, the same docs say access to the Order API, Offer API, **and Marketplace Insights cannot be granted upon request at all**, which settles that question: Insights is not on the menu, and no plan should assume it. `buy.item.bulk` is not in that list, so it does appear obtainable in principle. Second, EPN is an *affiliate* program that evaluates a business model, and the application wants UI mocks, so applying is worth doing **after stage 6's dashboard exists** rather than now with nothing to show. Nothing in the current design depends on this landing, so waiting costs nothing.
 - **Monitoring, so a dead pipeline is noticed by something other than a person happening to look.** The 2026-07-12 outage ran for about 7 hours in silence. A failed RQ job looks exactly like an idle one from the outside. Even something crude (a Discord ping on a failed job, which stage 5's alerting work already needs a webhook for) would have caught it immediately.

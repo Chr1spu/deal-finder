@@ -6,7 +6,9 @@ A secondhand-marketplace deal finder. Ingests listings, extracts image and text 
 
 Full plan: [PROJECT_PLAN.md](PROJECT_PLAN.md).
 
-**Status:** Stages 1-4 complete and running. Sold-price history is accumulating from disappearance tracking, listings are embedded and attribute-extracted, and the valuation engine produces deal scores. Stage 5 is done apart from the frontend: `GET /deals` serves a ranked feed, saved searches are managed over the API, writes are authenticated, and new deals post to a Discord webhook. Next is the React dashboard (stage 6) and deployment (stage 7).
+**Status:** Stages 1-6 complete and running. Sold-price history is accumulating from disappearance tracking, listings are embedded and attribute-extracted, the valuation engine produces deal scores, and the dashboard serves a deal feed, a watchlist and saved-search management. Stage 7's images and full Compose stack (`infra/`) are built and have been run end to end in isolation; what is left is deploying them to an actual host.
+
+**One number worth knowing before adding saved searches:** 59.7% of active listings are ever considered by the deal scan, up from 44.8% before `model_key` learned processors, consoles and phones (ADR [0022](docs/decisions/0022-model-key-beyond-graphics-cards.md)). The rest carry neither an eBay catalog id (`epid`) nor a recognised `model_key`, so nothing can comp them. That is a property of the categories being searched, not a bug, and it decides whether a new category is worth its quota. See [docs/decisions/0021](docs/decisions/0021-what-breaks-outside-pc-hardware.md).
 
 ### Capturing a listing from Depop or Facebook
 
@@ -48,6 +50,7 @@ The overlay shows what comparable eBay listings are **asking**, alongside the ca
    - `GET /deals` the ranked deal feed (served from the last scheduled scan)
    - `GET /deals/{id}` value one listing on demand
    - `GET /saved-searches` the keywords in use, with the daily call budget they cost
+   - `GET /watchlist` listings being followed individually, with price history
    - `GET /listings` the raw corpus, paginated
 9. `uv run pytest` to run the test suite. No live services required: DB tests use in-memory SQLite, eBay calls are mocked, and the few tests needing real Postgres or torch skip themselves when unavailable.
 
@@ -59,9 +62,18 @@ npm install
 npm run dev        # http://localhost:5173
 ```
 
-Deal feed with the comps behind every score, saved-search management with the
-live eBay call budget, and a price chart. Reads work without a key; changing
-searches needs the `API_KEY` pasted into the field in the header.
+Three tabs. **Deals** is the feed with the comps behind every score. **Watchlist**
+follows individual listings over time, showing the change since you started
+watching and what happened when they left the market. **Searches** manages
+keywords against the live eBay call budget. Reads work without a key; writes
+need the `API_KEY` pasted into the field in the header.
+
+The watchlist exists because the feed cannot answer its question. The feed is
+rebuilt from scratch by every scan, so a listing whose price rises out of the
+thresholds silently disappears from it. The watchlist's one column that does
+not depend on the estimate being right is the change since it was watched: it
+compares a listing against its own earlier price rather than against comps,
+which are themselves asking prices.
 
 The Vite dev server proxies `/api` to `127.0.0.1:8000`, so the browser makes
 same-origin requests and CORS never enters the picture. It is `127.0.0.1` and
@@ -79,13 +91,52 @@ rollup with no native module.
 
 Two queues, two workers, and they are not interchangeable. RQ hands a worker whatever job is next, so a single shared queue would eventually hand the deliberately torch-free ingest worker a GPU job and kill it on `import torch`.
 
+On Windows, start everything with one command, which is also how you stop it:
+
 ```
-rq worker undercut        --worker-class systems.queue.WindowsWorker   # ingest + disappearance check
-rq worker undercut-ml     --worker-class systems.queue.WindowsWorker   # embeddings (needs --group ml)
-uv run python -m systems.scheduler                                     # enqueues all three job types
+powershell -File scripts/start-local.ps1          # workers, scheduler, API
+powershell -File scripts/start-local.ps1 -Stop
 ```
 
-Run **exactly one of each**. Duplicate or stale workers have twice caused silent failures here: a leftover worker keeps executing whatever code it imported at startup, so it can quietly run a months-old version of a job against a current database. Drop `--worker-class` once these run inside Linux containers; it exists because RQ's default worker forks, which Windows cannot do.
+That script exists because launch commands are where this project keeps
+breaking. It kills anything already running from this repo before starting,
+and it never writes a queue name: `systems/rqworker.py` imports those from
+`systems/queue.py`. Underneath it runs
+
+```
+python -m systems.rqworker main     # ingest, disappearance check, deal scan
+python -m systems.rqworker ml       # embeddings (needs --group ml)
+python -m systems.scheduler         # enqueues all four job types
+```
+
+Run **exactly one of each**. Duplicate or stale workers have repeatedly caused silent failures here: a leftover worker keeps executing whatever code it imported at startup, so it can quietly run a months-old version of a job against a current database, and on one occasion actively reverted stored data. Check liveness with `python -m systems.scheduler_health`, which reads the scheduler's Redis heartbeat, rather than trusting the process list: `uv run` wrappers mean one logical worker shows up as two processes, so names lie.
+
+Inside the containers none of this applies. `--worker-class systems.queue.WindowsWorker` exists only because RQ's default worker forks and Windows cannot; on Linux the default is correct and gives better isolation.
+
+## Running the whole thing in Docker
+
+```
+docker compose -f infra/docker-compose.yml up -d                    # everything
+docker compose -f infra/docker-compose.yml up -d postgres redis     # just the databases
+```
+
+If a pipeline is already running on the host, use the isolated overlay instead.
+It moves every port, namespaces the volumes under a separate project name, and
+scales the scheduler to zero, so the two stacks cannot share a Redis and
+publish two sets of jobs to one queue:
+
+```
+docker compose -f infra/docker-compose.yml -f infra/docker-compose.isolated.yml \
+    --env-file .env -p undercut-isolated up -d
+docker compose -p undercut-isolated down -v
+```
+
+Two images, and the split is the same capability boundary as the two queues:
+`runtime` (API, ingest worker, scheduler) has no torch and is 1.04 GB,
+`ml-runtime` adds the ~3 GB CLIP stack for the embedding worker alone.
+Migrations run once as their own service that everything else waits on, so a
+worker can never come up against a schema its image predates. See
+[docs/decisions/0020](docs/decisions/0020-deployment-topology.md).
 
 ## Architecture overview
 

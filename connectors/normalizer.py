@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from api.models import Listing
 
@@ -111,7 +111,7 @@ def listing_has_ended(raw: dict, now: datetime | None = None) -> bool:
     inventing a sale. False negatives cost a later re-check; false positives
     would put a fabricated comp into the dataset permanently.
     """
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
 
     availabilities = raw.get("estimatedAvailabilities")
     candidates = (
@@ -128,10 +128,7 @@ def listing_has_ended(raw: dict, now: datetime | None = None) -> bool:
             return True
 
     end_date = _parse_ebay_datetime(raw.get("itemEndDate"))
-    if end_date is not None and end_date <= now:
-        return True
-
-    return False
+    return end_date is not None and end_date <= now
 
 
 def enrich_from_item_body(listing: Listing, raw: dict) -> None:
@@ -146,6 +143,16 @@ def enrich_from_item_body(listing: Listing, raw: dict) -> None:
     aspects = _flatten_aspects(raw)
     if aspects:
         listing.aspects = aspects
+
+    # Backfill the category id on rows ingested before it was captured. This
+    # is how the existing corpus acquires one at all: nothing else revisits an
+    # old row, and the id is what ml/similar.py should eventually filter on
+    # instead of the locale-dependent name. Additive like everything here, so
+    # a body that omits categories cannot blank a value already learned.
+    if listing.category_id is None:
+        categories = raw.get("categories") or []
+        if categories and categories[0].get("categoryId"):
+            listing.category_id = categories[0]["categoryId"]
 
     sold = _sold_quantity(raw)
     if sold is not None:
@@ -213,6 +220,9 @@ def normalize_ebay_item(raw: dict) -> Listing:
 
     categories = raw.get("categories", [])
     category = categories[0]["categoryName"] if categories else None
+    # The id, not just the name. categoryName is locale-dependent and the id
+    # is not, which is the whole reason this field exists. See api/models.py.
+    category_id = categories[0].get("categoryId") if categories else None
 
     posted_at = _parse_ebay_datetime(raw.get("itemCreationDate"))
     item_end_date = _parse_ebay_datetime(raw.get("itemEndDate"))
@@ -264,6 +274,7 @@ def normalize_ebay_item(raw: dict) -> Listing:
         location=location,
         condition=raw.get("condition"),
         category=category,
+        category_id=category_id,
         url=raw["itemWebUrl"],
         posted_at=posted_at,
     )

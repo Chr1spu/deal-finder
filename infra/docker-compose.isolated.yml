@@ -1,0 +1,55 @@
+# Bring the whole stack up without touching a running local pipeline.
+#
+#   docker compose -f infra/docker-compose.yml -f infra/docker-compose.isolated.yml \
+#       --env-file .env -p undercut-isolated up -d
+#
+# Why this file exists rather than just running the main one: the host stack
+# and the containers would otherwise share Redis, which means two schedulers
+# publishing to one queue. That is precisely the duplicate-scheduler failure
+# that doubled eBay quota consumption for 48 hours on 2026-08-07, and ADR 0020
+# pins `replicas: 1` to prevent. Sharing Postgres would be worse still, since
+# the containers would migrate and write the live corpus.
+#
+# So: different ports, a different compose project name (which namespaces the
+# volumes), and its own empty database. Nothing here can reach the real one.
+#
+# Note `!override` on every ports list. Compose MERGES list fields across
+# files rather than replacing them, so a plain `ports:` here would bind the
+# original port too and collide with the running host stack immediately.
+#
+# The eBay credentials are still read from .env, so an ingest inside this
+# stack spends real quota. Bring it up to verify the stack starts, wires up
+# and serves, then take it down; do not leave it running.
+
+services:
+  postgres:
+    ports: !override
+      - "55432:5432"
+    volumes:
+      # Named differently from the main file's `postgres_data`, and the
+      # project name namespaces it again. The live corpus is months of
+      # disappearance tracking and is the one thing here that cannot be
+      # rebuilt on demand.
+      - isolated_postgres_data:/var/lib/postgresql/data
+
+  redis:
+    ports: !override
+      - "56379:6379"
+
+  api:
+    ports: !override
+      - "58000:8000"
+
+  frontend:
+    ports: !override
+      - "55173:80"
+
+  # The scheduler is what makes this stack spend eBay quota on a timer. For a
+  # start-up smoke test that is not wanted, so it is scaled to zero here and
+  # can be started explicitly if a scheduling change is what is being tested.
+  scheduler:
+    deploy:
+      replicas: 0
+
+volumes:
+  isolated_postgres_data:

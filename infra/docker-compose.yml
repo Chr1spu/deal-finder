@@ -1,3 +1,38 @@
+# The whole stack. Run from the repo root so the build context includes the
+# source:
+#
+#   docker compose -f infra/docker-compose.yml up -d
+#   docker compose -f infra/docker-compose.yml logs -f scheduler
+#
+# Postgres and Redis alone (the arrangement used for local development on
+# Windows, where the Python side runs from a venv via scripts/start-local.ps1):
+#
+#   docker compose -f infra/docker-compose.yml up -d postgres redis
+#
+# The service names `dealfinder` in the database URL predate the rename to
+# Undercut and are deliberately left alone. Changing them orphans the existing
+# `postgres_data` volume, and the corpus in it is months of disappearance
+# tracking, which is the one asset here that cannot be rebuilt on demand.
+
+name: undercut
+
+x-python-env: &python-env
+  DATABASE_URL: postgresql+psycopg://dealfinder:dealfinder@postgres:5432/dealfinder
+  REDIS_URL: redis://redis:6379/0
+  EBAY_ENV: ${EBAY_ENV:-production}
+  EBAY_CLIENT_ID: ${EBAY_CLIENT_ID:?set EBAY_CLIENT_ID in .env}
+  EBAY_CLIENT_SECRET: ${EBAY_CLIENT_SECRET:?set EBAY_CLIENT_SECRET in .env}
+  # No default, and no fallback to empty. api/auth.py refuses every write when
+  # this is unset rather than disabling the check (ADR 0017), so an unset key
+  # is a working read-only deployment, not an open one.
+  API_KEY: ${API_KEY:-}
+  DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
+
+x-python-build: &python-build
+  context: ..
+  dockerfile: infra/Dockerfile
+  target: runtime
+
 services:
   postgres:
     image: pgvector/pgvector:pg16
@@ -25,5 +60,103 @@ services:
       timeout: 5s
       retries: 10
 
+  # Migrations run once, to completion, before anything that writes starts.
+  #
+  # This is a service rather than an entrypoint step on purpose. If each of
+  # the four Python services ran `alembic upgrade head` at boot they would
+  # race, and more importantly a worker could come up against a schema its
+  # own image predates. That exact drift (a worker holding models older than
+  # the NOT NULL columns in the database) killed ingestion silently three
+  # times, which is why systems/preflight.py exists. Ordering it here means
+  # the drift cannot happen in the first place.
+  migrate:
+    build: *python-build
+    command: ["alembic", "upgrade", "head"]
+    environment: *python-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: *python-build
+    command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment: *python-env
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Ingest, disappearance check, deal scan. No torch, deliberately: RQ hands a
+  # worker whatever job is next, so this one must never be able to receive an
+  # embedding job. That is enforced by the queue split, and by this image not
+  # containing torch at all, so a mistake fails at import rather than at 3am.
+  worker:
+    build: *python-build
+    command: ["python", "-m", "systems.rqworker", "main"]
+    environment: *python-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+  worker-ml:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile
+      target: ml-runtime
+    command: ["python", "-m", "systems.rqworker", "ml"]
+    environment: *python-env
+    volumes:
+      # CLIP weights, downloaded on first use. A named volume rather than a
+      # layer in the image: rebuilding the image should not re-download the
+      # model, and the image should not ship weights.
+      - model_cache:/home/undercut/.cache
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+  # EXACTLY ONE. Two schedulers means two sets of ingest and disappearance
+  # jobs against a measured 5,000 Browse calls/day, which is how a day's quota
+  # disappeared on 2026-08-07 when a second one was left running from an old
+  # venv. Never scale this service.
+  scheduler:
+    build: *python-build
+    command: ["python", "-m", "systems.scheduler"]
+    environment: *python-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+    deploy:
+      replicas: 1
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
+    restart: unless-stopped
+
 volumes:
   postgres_data:
+  model_cache:

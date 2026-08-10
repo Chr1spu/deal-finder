@@ -37,10 +37,10 @@ def seed(engine, count):
             session.add(
                 Listing(
                     source="ebay",
-                    source_id="deadlock-%d" % n,
-                    title="RTX 4090 %d" % n,
+                    source_id=f"deadlock-{n}",
+                    title=f"RTX 4090 {n}",
                     price=100.0 + n,
-                    url="https://example.com/%d" % n,
+                    url=f"https://example.com/{n}",
                     images=["https://i.ebayimg.com/images/g/abc/s-l225.jpg"],
                 )
             )
